@@ -19,8 +19,9 @@
   "scripts": {
     "start": "node bin/face-lock.js start",
     "init": "node bin/face-lock.js init",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js",
     "smoke": "node scripts/smoke.js",
+    "prepublishOnly": "npm test && npm run smoke",
     "postinstall": "node scripts/postinstall.js"
   },
   "keywords": [
@@ -45,12 +46,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/amosgoh/face-lock.git"
+    "url": "git+https://github.com/WiseAmos/face-lock.git"
   },
   "bugs": {
-    "url": "https://github.com/amosgoh/face-lock/issues"
+    "url": "https://github.com/WiseAmos/face-lock/issues"
   },
-  "homepage": "https://github.com/amosgoh/face-lock#readme",
+  "homepage": "https://github.com/WiseAmos/face-lock#readme",
   "dependencies": {
     "canvas": "^2.11.2",
     "commander": "^12.1.0",
