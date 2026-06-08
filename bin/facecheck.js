@@ -29,8 +29,8 @@ function run(args) {
   process.exit(r.status == null ? 1 : r.status);
 }
 
-if (sub === 'setup' || sub === 'status' || sub === 'stop' || sub === 'start' || sub === 'init' || sub === 'install' || sub === 'uninstall' || sub === 'reset') {
-  // Pass through
+if (sub === 'setup' || sub === 'status' || sub === 'stop' || sub === 'start' || sub === 'init' || sub === 'install' || sub === 'uninstall' || sub === 'reset' || sub === '-v' || sub === '--version' || sub === '-h' || sub === '--help') {
+  // Pass through (commander handles --version / --help and prints its own output)
   run([sub, ...process.argv.slice(3)]);
 } else {
   // No subcommand: smart default.

@@ -27,6 +27,12 @@ const profile = require('../src/profile');
 const detector = require('../src/detector');
 const monitorLib = require('../src/monitor');
 const camera = require('../src/camera');
+// @inquirer/prompts gives us battle-tested arrow-key prompts — same UX as
+// claude code, opencode, codex, and create-next-app. We tried rolling our own
+// raw-mode keypress handler in 0.1.3 and it had subtle bugs on Windows (a
+// stray Enter from a prior readline interface would resolve the menu before
+// the user could navigate). Inquirer's state machine avoids that class of bug.
+const inquirer = require('@inquirer/prompts');
 const canvas = (() => {
   // Try @napi-rs/canvas first (Skia-backed, ships NAPI prebuilds, no GTK/Cairo).
   // Fall back to `canvas` (node-canvas, Cairo) for older installs.
@@ -36,6 +42,47 @@ const canvas = (() => {
     catch (_2) { return null; }
   }
 })();
+
+/**
+ * One-shot async upgrade check. If the user has an older version of face-lock
+ * installed than what's on npm, print a hint to stderr. Never blocks; never
+ * throws; cached so it only runs once per process.
+ *
+ * Why this exists: `npm i face-lock` (without `-g @latest`) on a global
+ * install does NOT auto-upgrade — npm considers the existing version
+ * "satisfied" and returns. The only way to upgrade a stale global is
+ * `npm update -g face-lock` or `npm i -g face-lock@latest`. Users hit this
+ * and think the new version is broken when it's actually the old one.
+ */
+let _upgradeNoticeChecked = false;
+function checkForUpgradeAsync() {
+  if (_upgradeNoticeChecked) return;
+  _upgradeNoticeChecked = true;
+  if (!process.stderr.isTTY) return; // never spam CI / non-TTY
+  if (process.env.FACE_LOCK_NO_UPDATE_CHECK === '1') return;
+  if (process.env.CI) return;
+  // 2-second hard timeout; the registry call is fire-and-forget
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 2000);
+  fetch('https://registry.npmjs.org/face-lock/latest', { signal: ctrl.signal })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      clearTimeout(t);
+      if (!j || !j.version) return;
+      if (j.version === pkg.version) return;
+      // simple semver compare by segments
+      const newer = j.version.split('.').map((s) => parseInt(s, 10));
+      const cur = pkg.version.split('.').map((s) => parseInt(s, 10));
+      const isNewer = newer.some((n, i) => n > (cur[i] || 0))
+        && newer.every((n, i) => n >= (cur[i] || 0));
+      if (!isNewer) return;
+      process.stderr.write(
+        `\n  \x1b[33m!\x1b[0m face-lock ${pkg.version} installed; ${j.version} is available.\n` +
+        `    Run \x1b[1mnpm update -g face-lock\x1b[0m (or \x1b[1mnpm i -g face-lock@latest\x1b[0m) to upgrade.\n\n`
+      );
+    })
+    .catch(() => { /* offline / timeout / blocked — fine */ });
+}
 
 const program = new Command();
 program
@@ -135,15 +182,58 @@ async function prompt(question, { defaultValue, validator, password = false } = 
 }
 
 /**
- * Interactive selector. Falls back to typed numbers when stdin is not a TTY
- * (e.g., CI, smoke tests with redirected stdin). When stdin IS a TTY, the
- * user navigates with ↑/↓ and confirms with Enter — same UX as `opencode`,
- * `claude`, etc.
+ * Interactive prompts. Backed by @inquirer/prompts (arrow-key select,
+ * typed input, yes/no confirm). Same UX as claude / opencode / codex.
+ *
+ * In non-TTY contexts (CI, smoke tests with redirected stdin) we fall back
+ * to plain readline — inquirer refuses to run without a TTY and would throw.
  */
+async function confirm(question) {
+  if (!process.stdin.isTTY) {
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    return new Promise((resolve) => {
+      rl.question(`${question} [y/N] `, (ans) => {
+        rl.close();
+        resolve(/^y(es)?$/i.test(ans.trim()));
+      });
+    });
+  }
+  return inquirer.confirm({ message: question, default: false });
+}
+
+async function prompt(question, { defaultValue, validator } = {}) {
+  if (!process.stdin.isTTY) {
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    return new Promise((resolve) => {
+      const hint = defaultValue != null ? ` [${defaultValue}]` : '';
+      const ask = () => {
+        rl.question(`${question}${hint}: `, (ans) => {
+          const v = ans.trim() || (defaultValue != null ? String(defaultValue) : '');
+          if (validator && !validator(v)) {
+            process.stderr.write('  (invalid; try again)\n');
+            return ask();
+          }
+          rl.close();
+          resolve(v);
+        });
+      };
+      ask();
+    });
+  }
+  return inquirer.input({
+    message: question,
+    default: defaultValue != null ? String(defaultValue) : undefined,
+    validate: validator ? (v) => validator(v) || 'invalid' : undefined,
+  });
+}
+
 async function choose(question, choices, defaultIndex = 0) {
-  process.stderr.write(`\n  ${question}\n`);
-  if (!process.stdin.isTTY || process.env.FACE_LOCK_TYPED_PROMPT === '1') {
-    // Non-TTY: typed-number fallback (preserves the smoke test path).
+  if (!process.stdin.isTTY) {
+    // Non-TTY: typed-number fallback. Inquirer would throw, and the smoke
+    // test pipes stdin via spawn.
+    process.stderr.write(`\n  ${question}\n`);
     choices.forEach((c, i) => {
       const marker = i === defaultIndex ? '●' : '○';
       process.stderr.write(`    ${marker} ${i + 1}) ${c}\n`);
@@ -157,69 +247,11 @@ async function choose(question, choices, defaultIndex = 0) {
     });
     return choices[parseInt(v, 10) - 1];
   }
-
-  // TTY: arrow-key navigation.
-  return new Promise((resolve) => {
-    readline.emitKeypressEvents(process.stdin);
-    const wasRaw = process.stdin.isRaw;
-    if (process.stdin.setRawMode) process.stdin.setRawMode(true);
-
-    let i = defaultIndex;
-    const blockHeight = choices.length + 1; // 1 line for the question
-    let firstRender = true;
-
-    const render = () => {
-      if (!firstRender) {
-        // Move cursor up to the question line, then clear from there down.
-        process.stderr.write(`\x1b[${blockHeight}A`);
-        process.stderr.write(`\x1b[0J`);
-      }
-      firstRender = false;
-      process.stderr.write(`\x1b[2K  ${question}\n`);
-      choices.forEach((c, idx) => {
-        const marker = idx === i ? '\x1b[7m ▶ \x1b[0m' : '   '; // reverse-video cursor
-        process.stderr.write(`\x1b[2K${marker} ${idx + 1}) ${c}\n`);
-      });
-    };
-
-    const onKey = (str, key) => {
-      if (!key) return;
-      if (key.name === 'up' || (key.ctrl && key.name === 'k')) {
-        i = (i - 1 + choices.length) % choices.length;
-      } else if (key.name === 'down' || (key.ctrl && key.name === 'j')) {
-        i = (i + 1) % choices.length;
-      } else if (key.name === 'return' || key.name === 'enter' || str === '\r' || str === '\n') {
-        cleanup();
-        // Final selection: rewrite the cursor row with a settled marker.
-        process.stderr.write(`\x1b[${blockHeight}A\x1b[0J`);
-        process.stderr.write(`\x1b[2K  ${question}\n`);
-        choices.forEach((c, idx) => {
-          const marker = idx === i ? ' ●' : ' ○';
-          process.stderr.write(`\x1b[2K${marker} ${idx + 1}) ${c}\n`);
-        });
-        resolve(choices[i]);
-        return;
-      } else if (key.ctrl && key.name === 'c') {
-        cleanup();
-        process.stderr.write('\n');
-        process.exit(130);
-        return;
-      } else {
-        return; // ignore other keys
-      }
-      render();
-    };
-
-    const cleanup = () => {
-      process.stdin.removeListener('keypress', onKey);
-      if (process.stdin.setRawMode) {
-        try { process.stdin.setRawMode(wasRaw); } catch (_) { /* */ }
-      }
-    };
-
-    process.stdin.on('keypress', onKey);
-    render();
+  const ans = await inquirer.select({
+    message: question,
+    choices: choices.map((c, i) => ({ name: c, value: c, default: i === defaultIndex })),
   });
+  return ans;
 }
 
 async function runSetup() {
@@ -559,4 +591,8 @@ function winService(action, node, cli) {
   }
 }
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).then(() => {
+  // Fire the upgrade notice at the very end so the command's own output
+  // appears first and the notice doesn't interrupt it.
+  checkForUpgradeAsync();
+});

@@ -12,7 +12,7 @@ Auto-lock your laptop when you walk away. Face-recognition powered.
 - **Returns cancel the lock** — if your face comes back inside the 15 s window, you're not locked out.
 - **Cross-platform**: macOS, Linux, Windows.
 - **Installable globally** via `npm install -g`.
-- **Interactive wizard** (`face-lock setup`) with step-by-step prompts.
+- **Interactive wizard** (`face-lock setup`) with step-by-step arrow-key prompts (powered by `@inquirer/prompts` — same UX as claude-code / opencode / codex / create-next-app).
 - **No telemetry, no network calls.** Your face descriptor never leaves the machine.
 
 ## Install
@@ -22,6 +22,18 @@ npm install -g face-lock
 ```
 
 > No native build step. `face-lock` uses [`@napi-rs/canvas`](https://www.npmjs.com/package/@napi-rs/canvas) (Skia-backed, NAPI), which ships prebuilt binaries for Windows / macOS / Linux on Node 18, 20, 22, and 24.
+
+### Upgrading from a previous version
+
+`npm i face-lock` does NOT auto-upgrade an existing global install — npm considers the version "satisfied" and returns. To upgrade:
+
+```bash
+npm update -g face-lock          # upgrade to latest within the same major
+# or
+npm install -g face-lock@latest  # explicit latest
+```
+
+`face-lock` also self-checks the npm registry on every run and prints a yellow notice to stderr if a newer version is available. Disable with `FACE_LOCK_NO_UPDATE_CHECK=1`.
 
 ## Quick start (interactive)
 

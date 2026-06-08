@@ -54,4 +54,10 @@ const reset = run(['reset'], { input: 'n\n', env: { FACE_LOCK_CONFIG: `${tmp}/cf
 check('exits non-zero when cancelled', reset.status === 0, 'reset was cancelled — should still exit 0');
 check('says cancelled', /cancelled/i.test(reset.stdout) || /cancelled/i.test(reset.stderr));
 
+console.log('  smoke: facecheck --version passthrough');
+const fcBin = path.resolve(__dirname, '..', 'bin', 'facecheck.js');
+const fcVer = require('child_process').spawnSync('node', [fcBin, '--version'], { encoding: 'utf8' });
+check('facecheck --version exits 0', fcVer.status === 0, `status=${fcVer.status}`);
+check('facecheck --version shows version', /\d+\.\d+\.\d+/.test(fcVer.stdout), `stdout=${fcVer.stdout}`);
+
 console.log('  smoke: ok');

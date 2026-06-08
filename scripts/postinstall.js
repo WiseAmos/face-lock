@@ -9,12 +9,6 @@
  * as a trade-off — the alternative is making the user remember to type
  * `facecheck` after every install, which is the friction we are
  * explicitly choosing to remove.
- *
- * The wizard itself falls back to typed-number input when stdin is not
- * a TTY, so the install will at least print all its options and wait
- * for the user to type a number. In a true CI context the install will
- * time out; in an interactive shell the user is one keystroke away from
- * being enrolled.
  */
 
 const path = require('path');
@@ -29,6 +23,7 @@ const lines = [
   `  ╰─────────────────────────────────────────────────────────╯`,
   '',
   '  Launching setup wizard...',
+  '  (If you have an older version, run `npm update -g face-lock` first.)',
   '',
 ];
 for (const l of lines) process.stdout.write(l + '\n');
