@@ -1,0 +1,66 @@
+{
+  "name": "face-lock",
+  "version": "0.1.0",
+  "description": "Auto-lock your laptop when you walk away. Face-recognition powered, cross-platform (macOS, Windows, Linux).",
+  "main": "src/index.js",
+  "bin": {
+    "face-lock": "bin/face-lock.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "assets",
+    "models",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "start": "node bin/face-lock.js start",
+    "init": "node bin/face-lock.js init",
+    "test": "node --test test/",
+    "smoke": "node scripts/smoke.js",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "keywords": [
+    "face",
+    "recognition",
+    "lock",
+    "security",
+    "privacy",
+    "laptop",
+    "auto-lock",
+    "face-api"
+  ],
+  "author": "Amos Goh",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amosgoh/face-lock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/amosgoh/face-lock/issues"
+  },
+  "homepage": "https://github.com/amosgoh/face-lock#readme",
+  "dependencies": {
+    "canvas": "^2.11.2",
+    "commander": "^12.1.0",
+    "face-api.js": "^0.22.2",
+    "systeminformation": "^5.23.5"
+  },
+  "devDependencies": {
+    "sinon": "^17.0.1"
+  },
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  }
+}
