@@ -153,7 +153,7 @@ async function runSetup() {
   console.log('  This will:');
   console.log('    1) pick your options');
   console.log('    2) enroll your face');
-  console.log('    3) install as a service that runs at login\n');
+  console.log('    3) optionally install as a service that runs at login\n');
 
   const graceStr = await prompt('  grace period in seconds before lock (default 15)', {
     defaultValue: '15',
@@ -182,11 +182,20 @@ async function runSetup() {
   ], 0);
   const multiFaceDimEnabled = multiDim.startsWith('yes');
 
+  // Liveness: ON by default — but the user is given a clear yes/no here.
+  // We strongly recommend keeping it on. Disabling is documented in README.
+  const live = await choose('  liveness check: reject printed photos and phone-on-screen attacks?', [
+    'yes — strongly recommended (combines face texture + motion; no new model)',
+    'no — disable liveness (you can re-enable later in ~/.face-lock/config.json)',
+  ], 0);
+  const livenessEnabled = live.startsWith('yes');
+
   console.log('\n  ── summary ──');
   console.log(`    grace            : ${graceMs}ms`);
   console.log(`    soft block       : ${softBlockEnabled ? 'on' : 'off'}`);
   console.log(`    away-face dim    : ${awayFaceDimEnabled ? 'on' : 'off'}`);
   console.log(`    multi-face dim   : ${multiFaceDimEnabled ? 'on' : 'off'}`);
+  console.log(`    liveness         : ${livenessEnabled ? 'on' : 'off'}`);
 
   const proceed = await confirm('\n  proceed with enrollment?');
   if (!proceed) {
@@ -195,14 +204,17 @@ async function runSetup() {
   }
 
   // Step 1: enroll
-  await runInit({ grace: graceMs, threshold: cfg.DEFAULTS.matchThreshold, softBlock: softBlockEnabled, awayDim: awayFaceDimEnabled, multiFaceDim: multiFaceDimEnabled });
+  await runInit({ grace: graceMs, threshold: cfg.DEFAULTS.matchThreshold, softBlock: softBlockEnabled, awayDim: awayFaceDimEnabled, multiFaceDim: multiFaceDimEnabled, liveness: livenessEnabled });
 
   // Step 2: install as service
-  const install = await confirm('\n  install face-lock as a service (auto-start at login)?');
-  if (install) {
+  const install = await choose('\n  install face-lock to auto-start at login?', [
+    'yes — recommended (run the monitor as a background service; the lock fires as soon as you walk away from your laptop)',
+    'no — start it manually with `facecheck` whenever you want',
+  ], 0);
+  if (install.startsWith('yes')) {
     runService('install');
   } else {
-    console.log('  you can run `face-lock install` later.');
+    console.log('  you can run `face-lock install` later (or just `facecheck` to start the monitor once).');
   }
 }
 
@@ -237,6 +249,7 @@ async function runInit(opts) {
     awayFaceDimPitchMax: cfg.DEFAULTS.awayFaceDimPitchMax,
     multiFaceDimEnabled: !!opts.multiFaceDim,
     multiFaceDimDelayMs: cfg.DEFAULTS.multiFaceDimDelayMs,
+    livenessEnabled: opts.liveness != null ? !!opts.liveness : cfg.DEFAULTS.livenessEnabled,
   });
   console.log(`  config saved: ${configPath}`);
 

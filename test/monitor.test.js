@@ -352,3 +352,121 @@ test('multi-face dim: dim clears when back to 1 face', async () => {
   assert.equal(events.awayUndim, 1, 'should undim when back to one face');
   m.stop();
 });
+
+// ── Liveness tests ────────────────────────────────────────────────────────
+//
+// These exercise the monitor's liveness integration. The texture signal
+// needs a real node-canvas to be meaningful, so we drive the liveness
+// decision via the temporal landmark-jitter path (a 1.5s window of the
+// nose-tip's std-dev).
+
+function jitterLandmarks(seed = 0) {
+  // Stable points for indices 30 (nose), 36 (left eye), 45 (right eye).
+  // nose x oscillates between 64.0 and 64.8 (jitter ~0.4px, below threshold)
+  // or 64.0 and 65.0 (jitter ~0.5px, ABOVE threshold when scaled by 0.25
+  // std-dev). Tests drive the streak by feeding many frames.
+  return Array.from({ length: 68 }, (_, i) => {
+    if (i === 30) return { x: 64 + (seed % 2 === 0 ? 0 : 0.6), y: 64 };
+    if (i === 36) return { x: 56, y: 60 };
+    if (i === 45) return { x: 72, y: 60 };
+    return { x: 64, y: 64 };
+  });
+}
+
+test('liveness: enabled by default (no opt-in flag)', () => {
+  // Just confirm the default config has livenessEnabled on.
+  const cfg = require('../src/config');
+  assert.equal(cfg.DEFAULTS.livenessEnabled, true, 'liveness should be default ON');
+});
+
+test('liveness: matched face with jittering nose is treated as you', async () => {
+  let n = 0;
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      livenessEnabled: true,
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    detectFn: async () => ({ detection: { landmarks: { positions: jitterLandmarks(n++) } }, descriptor: { label: 'me' } }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m.start();
+  // ~10 ticks of jittering nose → liveness should accept
+  for (let i = 0; i < 10; i++) await m.tick();
+  await wait(50);
+  // No liveness-fail event expected
+  const fails = [];
+  m.on('liveness-fail', (p) => fails.push(p));
+  await m.tick();
+  assert.deepEqual(fails, [], 'jittering nose should pass liveness');
+  assert.equal(m.state, STATE.PRESENT);
+  m.stop();
+});
+
+test('liveness: matched face held perfectly still is treated as NOT you', async () => {
+  const events = { left: 0, lock: 0, livenessFail: 0, livenessReasons: [] };
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      livenessEnabled: true,
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    // 68-pt landmark array where the nose DOES NOT move — simulates a printed
+    // photo on a stand.
+    detectFn: async () => ({
+      detection: { landmarks: { positions: jitterLandmarks(0) } },
+      descriptor: { label: 'me' },
+    }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m.on('left',          () => events.left++);
+  m.on('lock',          () => events.lock++);
+  m.on('liveness-fail', (p) => { events.livenessFail++; events.livenessReasons.push(p.reason); });
+  m.start();
+  // first few frames build the buffer (no fail yet — temporal needs samples)
+  await m.tick(); await m.tick(); await m.tick(); await m.tick();
+  // now the buffer is full and never sees motion → fail
+  for (let i = 0; i < 8; i++) await m.tick();
+  await wait(20);
+  assert.ok(events.livenessFail > 0, `expected liveness-fail events, got ${events.livenessFail}`);
+  assert.ok(events.livenessReasons.includes('no-temporal-motion'),
+    `expected reason 'no-temporal-motion', got ${JSON.stringify(events.livenessReasons)}`);
+  // Because the monitor treats the photo as "not you", the first failed
+  // frame triggers onLeft() and the state machine enters GRACE.
+  assert.equal(m.state, STATE.GRACE, 'still photo should be treated as face left');
+  m.stop();
+});
+
+test('liveness: disabled in config → no liveness rejection even with still nose', async () => {
+  const events = { livenessFail: 0, left: 0 };
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      livenessEnabled: false,  // <-- opt-out path
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    detectFn: async () => ({
+      detection: { landmarks: { positions: jitterLandmarks(0) } },
+      descriptor: { label: 'me' },
+    }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m.on('liveness-fail', () => events.livenessFail++);
+  m.on('left',          () => events.left++);
+  m.start();
+  for (let i = 0; i < 10; i++) await m.tick();
+  await wait(20);
+  assert.equal(events.livenessFail, 0, 'liveness off → no liveness-fail events');
+  assert.equal(events.left, 0, 'liveness off → still nose does not trigger grace');
+  assert.equal(m.state, STATE.PRESENT);
+  m.stop();
+});

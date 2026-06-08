@@ -4,7 +4,8 @@
   "description": "Auto-lock your laptop when you walk away. Face-recognition powered, cross-platform (macOS, Windows, Linux).",
   "main": "src/index.js",
   "bin": {
-    "face-lock": "bin/face-lock.js"
+    "face-lock": "bin/face-lock.js",
+    "facecheck": "bin/facecheck.js"
   },
   "files": [
     "bin",

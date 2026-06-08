@@ -36,8 +36,9 @@ This walks you through:
 1. Grace period (default 15 s).
 2. Soft-block on/off.
 3. Shoulder-surf dim (opt-in, see below).
-4. Face enrollment (~5 s — look at the camera).
-5. Install as a service that auto-starts at login.
+4. Liveness check (default on — see Liveness section).
+5. Face enrollment (~5 s — look at the camera).
+6. Install as a service that auto-starts at login.
 
 ## Manual usage
 
@@ -107,13 +108,51 @@ Both are **opt-in for a reason** — they're heuristics. The first one is fairly
 
 **What multi-face dim does NOT do** — it does **not** lock the screen, just dims it. Your session keeps running, the dim prevents the onlooker from reading what's there, and when the second face leaves the screen comes back. This is intentional: an attacker standing close enough to be on your webcam is probably also close enough to hear you typing a password, so we don't kick you out of your own session.
 
-**What neither does** — detect a *photo* of your face being held up. The model is 2D geometry; it has no liveness check. If you want liveness, that's a real model upgrade (depth-IR or rPPG / pulse detection), and out of scope for v0.1.
+**What neither does** — detect a *photo* of your face being held up. That's what liveness (below) is for.
 
 ```bash
 face-lock start --multi-face-dim
 # or in your config:
 echo '{ "multiFaceDimEnabled": true }' > ~/.face-lock/config.json
 ```
+
+### Liveness check (default ON)
+
+A photo of your face held up to the camera, or your face on a phone screen, will fool pure 2D face recognition. `face-lock` ships a lightweight liveness detector that combines two cheap signals — no extra model download, no extra ~5 MB.
+
+1. **Texture signal** — the variance and Laplacian energy of a 32×32 face crop. A printed photo or a phone screen has abnormally low texture (smooth / moiré). Real skin does not.
+2. **Temporal landmark jitter** — the std-dev of the 68-pt nose / eye landmarks over a 1.5 s rolling window. A real face has involuntary micro-motion (~0.3 px std-dev even when sitting still). A photo does not.
+
+If both signals say "not alive", the monitor treats that frame as "face not present" → grace → lock. Liveness is **on by default**; you do not need to pass any flag to enable it. Disable it by editing `~/.face-lock/config.json`:
+
+```json
+{ "livenessEnabled": false }
+```
+
+> Liveness is not perfect. In low light, real faces can fail the texture signal (the noise floor of a noisy webcam resembles flat). If you find yourself being locked out at night, either turn on a lamp or disable liveness. There is no flag to tune the thresholds in v0.1 — it's a single "on / off" switch. A future version may expose thresholds.
+
+### Autostart (login service)
+
+`face-lock install` registers a service that runs the monitor in the background, every login:
+
+- **macOS** — LaunchAgent at `~/Library/LaunchAgents/com.amosgoh.face-lock.plist` with `KeepAlive=true`.
+- **Linux** — systemd user unit at `~/.config/systemd/user/face-lock.service`.
+- **Windows** — both a Startup-folder `.bat` and a Scheduled Task with "Run whether user is logged on or not" set.
+
+When you log in, the monitor starts automatically; when you walk away, the OS lock fires within 15 s; you don't need to think about it. `face-lock uninstall` removes the service. `face-lock status` shows whether the service is registered and active.
+
+## Short alias: `facecheck`
+
+`face-lock` is long to type. The package also installs a short alias — `facecheck` — that does what you'd expect:
+
+```bash
+facecheck         # if no profile yet, runs setup. otherwise starts the monitor.
+facecheck status  # show if the service is running
+facecheck stop    # stop the monitor
+facecheck setup   # run the setup wizard
+```
+
+It works the same way `opencode` does: once `npm install -g face-lock` is done, `facecheck` is on your PATH. Use whichever name you prefer.
 
 ## File layout
 
@@ -137,7 +176,7 @@ You can override the home dir with `FACE_LOCK_HOME=/some/path`.
 
 - **Doesn't replace your OS password.** When the OS lock fires, you still need your password. This is a feature.
 - **Doesn't run silently.** `face-lock init` requires camera access permission. macOS will prompt. Windows will prompt. Linux uses V4L2.
-- **Doesn't recognise you through a photo** (the 3-frame enrollment requires natural movement + the 68-pt landmarks detect blink / micro-expressions poorly but a flat photo on a phone won't pass the 0.55 threshold for high-quality enrollments).
+- **Doesn't recognise you through a photo, by default.** The liveness check (on by default) catches printed photos and phone-on-screen attacks. Disable via `~/.face-lock/config.json` (`livenessEnabled: false`) only if you know what you're doing.
 
 ## Troubleshooting
 

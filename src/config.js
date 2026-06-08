@@ -24,6 +24,13 @@ const DEFAULTS = Object.freeze({
   // Triggers when 2+ faces are detected while your face is matched.
   multiFaceDimEnabled: false,
   multiFaceDimDelayMs: 2000,    // must be multi-face this long before dim
+
+  // Liveness (default ON, no flag exposed). Catches printed photos and
+  // phone-on-screen attacks by combining two cheap signals:
+  //   1) texture (variance + Laplacian energy) of the face crop
+  //   2) temporal landmark jitter over a 1.5s rolling window
+  // See src/liveness.js. Set to false in your config to disable.
+  livenessEnabled: true,
 });
 
 function defaultConfigPath() {

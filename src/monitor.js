@@ -27,6 +27,7 @@ const { detectAll, detectOne } = require('./detector');
 const lock = require('./lock');
 const overlay = require('./overlay');
 const headpose = require('./headpose');
+const liveness = require('./liveness');
 
 const STATE = Object.freeze({
   PRESENT: 'PRESENT',
@@ -64,6 +65,10 @@ class Monitor extends EventEmitter {
     this.awayDimActive = false;
     this.running = false;
     this.profile = null;
+    // Liveness: per-session handle that keeps the rolling landmark buffer.
+    this.livenessTl = new liveness.TemporalLiveness();
+    this.livenessStreak = 0;   // consecutive frames that passed liveness
+    this.livenessRejectStreak = 0;
 
     if (profile.exists()) {
       this.profile = profile.load();
@@ -102,7 +107,25 @@ class Monitor extends EventEmitter {
         if (!result) result = allFaces.best;
       }
     }
-    const isYou = this.isMatch(result);
+    const matched = this.isMatch(result);
+
+    // Liveness check (default ON, no flag). It runs on matched faces only —
+    // we don't care if a non-you face is "alive" or not.
+    let isYou = matched;
+    if (matched && this.cfg.livenessEnabled) {
+      const live = liveness.check(result, frame, this.livenessTl, this.now());
+      if (live.alive) {
+        this.livenessStreak++;
+        this.livenessRejectStreak = 0;
+      } else {
+        this.livenessStreak = 0;
+        this.livenessRejectStreak++;
+        this.log(1, `liveness reject: ${live.reason} (streak ${this.livenessRejectStreak})`);
+        this.emit('liveness-fail', { reason: live.reason, texture: live.texture });
+        // Treat as not-you for this frame (grace timer starts).
+        isYou = false;
+      }
+    }
 
     this.log(2, `faces=${faceCount} you=${isYou}`);
 
@@ -277,6 +300,9 @@ class Monitor extends EventEmitter {
     this.clearGrace();
     this.awayDimActive = false;
     this.awayStreak = 0;
+    this.livenessTl.reset();
+    this.livenessStreak = 0;
+    this.livenessRejectStreak = 0;
     this.log(1, 'monitor stopped');
     this.emit('stop');
   }
