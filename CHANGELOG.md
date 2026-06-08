@@ -5,7 +5,21 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.1] - 2026-06-08
+## [0.1.2] - 2026-06-08
+
+### Fixed
+- **CRITICAL: published tarball was missing `scripts/` directory.**
+  `package.json` listed `bin, src, assets, models, README, LICENSE, CHANGELOG`
+  in the `files` allowlist, but omitted `scripts/`. So `scripts/postinstall.js`
+  and `scripts/smoke.js` were silently excluded from every published
+  tarball. The `postinstall` npm hook then failed with
+  `Cannot find module 'scripts/postinstall.js'` on every clean install.
+  This bug existed in **0.1.0 and 0.1.1** — both versions have been
+  unrunnable from npm.
+- **0.1.0 and 0.1.1 have been unpublished.** `npm install -g face-lock`
+  will now resolve to 0.1.2.
+
+## [0.1.1] - 2026-06-08 [YANKED — broken at install]
 
 ### Changed
 - **Replaced `node-canvas` with `@napi-rs/canvas`** (Skia-backed, NAPI prebuilts).
@@ -34,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install without compilation. **Not yet exercised on Windows** — please
   report any install-time issues at the GitHub repo.
 
-## [0.1.0] - 2026-06-08
+## [0.1.0] - 2026-06-08 [YANKED — broken at install]
 
 ### Added
 - Initial release.

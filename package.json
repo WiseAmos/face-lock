@@ -1,6 +1,6 @@
 {
   "name": "face-lock",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Auto-lock your laptop when you walk away. Face-recognition powered, cross-platform (macOS, Windows, Linux).",
   "main": "src/index.js",
   "bin": {
@@ -10,6 +10,7 @@
   "files": [
     "bin",
     "src",
+    "scripts",
     "assets",
     "models",
     "README.md",
