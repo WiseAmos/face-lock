@@ -28,10 +28,9 @@ const lines = [
   '    - Camera permissions may be required on macOS / Windows.',
   '    - The `init` step downloads ~17MB of face detection models',
   '      to ~/.face-lock/models (one-time, then cached).',
-  '    - If `node-canvas` fails to build, install build tools:',
-  '         macOS : xcode-select --install',
-  '         Linux: sudo apt install -y build-essential libcairo2-dev',
-  '         Win  : npm install -g windows-build-tools',
+  '    - No native build step required: face-lock uses @napi-rs/canvas,',
+  '      which ships prebuilt binaries for Windows / macOS / Linux on',
+  '      Node 18, 20, 22, and 24.',
   '',
 ];
 for (const l of lines) process.stdout.write(l + '\n');

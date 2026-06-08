@@ -21,10 +21,7 @@ Auto-lock your laptop when you walk away. Face-recognition powered.
 npm install -g face-lock
 ```
 
-> First-time install compiles `node-canvas` — make sure you have build tools:
-> - **macOS**: `xcode-select --install`
-> - **Linux**: `sudo apt install -y build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev`
-> - **Windows**: `npm install -g windows-build-tools`
+> No native build step. `face-lock` uses [`@napi-rs/canvas`](https://www.npmjs.com/package/@napi-rs/canvas) (Skia-backed, NAPI), which ships prebuilt binaries for Windows / macOS / Linux on Node 18, 20, 22, and 24.
 
 ## Quick start (interactive)
 

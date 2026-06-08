@@ -27,12 +27,13 @@ const profile = require('../src/profile');
 const detector = require('../src/detector');
 const monitorLib = require('../src/monitor');
 const camera = require('../src/camera');
-const { load: loadCanvas } = (() => {
-  try {
-    // eslint-disable-next-line global-require
-    return require('canvas');
-  } catch (_) {
-    return { load: () => { throw new Error('canvas not available'); } };
+const canvas = (() => {
+  // Try @napi-rs/canvas first (Skia-backed, ships NAPI prebuilds, no GTK/Cairo).
+  // Fall back to `canvas` (node-canvas, Cairo) for older installs.
+  try { return require('@napi-rs/canvas'); }
+  catch (_) {
+    try { return require('canvas'); }
+    catch (_2) { return null; }
   }
 })();
 
@@ -219,7 +220,7 @@ async function runSetup() {
 }
 
 async function loadImageAsCanvas(imgPath) {
-  const canvas = loadCanvas();
+  if (!canvas) throw new Error('canvas not available');
   const img = await canvas.loadImage(imgPath);
   const c = canvas.createCanvas(img.width, img.height);
   const ctx = c.getContext('2d');
@@ -269,8 +270,8 @@ async function runInit(opts) {
   console.log('  captured. extracting descriptor...');
 
   try {
-    const canvas = await loadImageAsCanvas(imgPath);
-    const result = await detector.detectOne(canvas);
+    const imgCanvas = await loadImageAsCanvas(imgPath);
+    const result = await detector.detectOne(imgCanvas);
     if (!result) {
       console.error('\n  ✗ No face detected. Tips:');
       console.error('     - face the camera, well-lit');
@@ -323,9 +324,9 @@ async function runStart(opts) {
     frameSource: {
       getFrame: async () => {
         const p = await cam.capture();
-        const canvas = await loadImageAsCanvas(p);
+        const imgCanvas = await loadImageAsCanvas(p);
         try { fs.unlinkSync(p); } catch (_) { /* */ }
-        return canvas;
+        return imgCanvas;
       },
     },
   });

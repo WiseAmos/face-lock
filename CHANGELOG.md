@@ -5,6 +5,35 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-06-08
+
+### Changed
+- **Replaced `node-canvas` with `@napi-rs/canvas`** (Skia-backed, NAPI prebuilts).
+  Fixes `npm install -g face-lock` failing on Windows + Node 24, where
+  `node-canvas@2.11.2` has no prebuilt binary for the `node-v137` ABI and the
+  source-compile fallback requires GTK / Cairo runtime headers at
+  `C:\GTK\bin\` (no longer required). No build tools needed on any platform.
+- **Postinstall message** no longer references `windows-build-tools` /
+  `libcairo2-dev` / `xcode-select`. The README's `Install` section was
+  updated to match.
+
+### Fixed
+- `bin/face-lock.js` had a leftover `const canvas = loadCanvas()` shadow
+  inside `loadImageAsCanvas()` that was unreachable on the failure path
+  (the prior `loadCanvas` threw before reassignment). Now guarded explicitly
+  with `if (!canvas) throw new Error('canvas not available')`.
+- Renamed two inner `const canvas = ...` locals to `imgCanvas` to avoid
+  shadowing the module-level `canvas` import (cosmetic; no behavior change).
+
+### Compatibility
+- All public API surface (`createCanvas`, `loadImage`, `getContext('2d')`,
+  `getImageData`, `putImageData`, `drawImage`) is identical between
+  `node-canvas` and `@napi-rs/canvas`. The liveness sampler's 43-test suite
+  passes unchanged.
+- Tested on Linux + Node 22. Windows / macOS prebuilds are NAPI, so they
+  install without compilation. **Not yet exercised on Windows** — please
+  report any install-time issues at the GitHub repo.
+
 ## [0.1.0] - 2026-06-08
 
 ### Added

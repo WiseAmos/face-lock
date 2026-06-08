@@ -30,7 +30,13 @@
  */
 
 const { createCanvas } = (() => {
-  try { return require('canvas'); } catch (_) { return { createCanvas: null }; }
+  // Try @napi-rs/canvas first (Skia-backed, ships NAPI prebuilds, no GTK/Cairo).
+  // Fall back to `canvas` (node-canvas, Cairo) for older installs.
+  try { return require('@napi-rs/canvas'); }
+  catch (_) {
+    try { return require('canvas'); }
+    catch (_2) { return { createCanvas: null }; }
+  }
 })();
 
 const TEX_MIN_VARIANCE = 18;       // too low → likely flat / printed

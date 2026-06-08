@@ -1,6 +1,6 @@
 {
   "name": "face-lock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Auto-lock your laptop when you walk away. Face-recognition powered, cross-platform (macOS, Windows, Linux).",
   "main": "src/index.js",
   "bin": {
@@ -53,7 +53,7 @@
   },
   "homepage": "https://github.com/WiseAmos/face-lock#readme",
   "dependencies": {
-    "canvas": "^2.11.2",
+    "@napi-rs/canvas": "^1.0.0",
     "commander": "^12.1.0",
     "face-api.js": "^0.22.2",
     "systeminformation": "^5.23.5"
