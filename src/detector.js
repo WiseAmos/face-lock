@@ -119,6 +119,45 @@ async function detectOne(input) {
   };
 }
 
+/**
+ * Detect ALL faces in a frame. Used by the "second-person" / shoulder-surfing
+ * detection path. Returns either `null` (no faces at all) or an object:
+ *
+ *   {
+ *     detections: [{ detection, descriptor }, ...],  // every face found
+ *     count:       N,                                 // === detections.length
+ *     best:        { detection, descriptor },         // the largest / most-confident one
+ *   }
+ *
+ * `best` is convenient for the existing single-face match path so callers
+ * can do "is the primary face the enrolled user?" without scanning manually.
+ */
+async function detectAll(input) {
+  const faceApi = await loadModels();
+  const results = await faceApi
+    .detectAllFaces(input)
+    .withFaceLandmarks()
+    .withFaceDescriptors();
+  if (!results || results.length === 0) return null;
+  const detections = results.map((d) => ({
+    detection: d,
+    descriptor: Array.from(d.descriptor),
+  }));
+  // "Best" = largest box area. face-api returns `alignedRect.box` with x,y,width,height.
+  let best = detections[0];
+  let bestArea = 0;
+  for (const f of detections) {
+    const b = f.detection && f.detection.alignedRect && f.detection.alignedRect._box;
+    if (!b) continue;
+    const area = b.width * b.height;
+    if (area > bestArea) {
+      bestArea = area;
+      best = f;
+    }
+  }
+  return { detections, count: detections.length, best };
+}
+
 function faceapi() {
   if (!_faceApi) {
     // eslint-disable-next-line global-require
@@ -134,5 +173,6 @@ module.exports = {
   loadModels,
   getDetector,
   detectOne,
+  detectAll,
   faceapi,
 };

@@ -56,7 +56,8 @@ program
   .option('--no-soft-block', 'do not dim display during grace')
   .option('--grace <ms>', 'lock grace period in ms', parseGrace, cfg.DEFAULTS.graceMs)
   .option('--threshold <n>', 'match distance threshold (lower = stricter)', (v) => parseFloat(v), cfg.DEFAULTS.matchThreshold)
-  .option('--away-dim', 'dim screen if face detected but head turned away (opt-in, more false positives)', false)
+  .option('--away-dim', 'dim screen if your face is present but head turned away (opt-in, more false positives)', false)
+  .option('--multi-face-dim', 'dim screen if 2+ faces are detected while you are present (opt-in: catches someone behind you)', false)
   .action(async (opts) => {
     await runInit(opts);
   });
@@ -68,7 +69,8 @@ program
   .option('--grace <ms>', 'lock grace period in ms', parseGrace)
   .option('--threshold <n>', 'match distance threshold (lower = stricter)', (v) => parseFloat(v))
   .option('--camera <n>', 'camera index (-1 = default)', (v) => parseInt(v, 10), -1)
-  .option('--away-dim', 'enable shoulder-surfing dim (off by default)', false)
+  .option('--away-dim', 'enable head-turned-away dim (off by default)', false)
+  .option('--multi-face-dim', 'enable multi-face / shoulder-surf dim (off by default)', false)
   .action(async (opts) => {
     await runStart(opts);
   });
@@ -174,10 +176,17 @@ async function runSetup() {
   ], 0);
   const awayFaceDimEnabled = awayDim.startsWith('yes');
 
+  const multiDim = await choose('  multi-face / "someone behind you" dim: dim screen if 2+ faces are visible while you are present?', [
+    'no — recommended (fewer false positives; you can enable later with --multi-face-dim)',
+    'yes — dim for 2s when 2+ faces are seen (catches someone standing behind you; some false positives from posters/screens)',
+  ], 0);
+  const multiFaceDimEnabled = multiDim.startsWith('yes');
+
   console.log('\n  ── summary ──');
-  console.log(`    grace           : ${graceMs}ms`);
-  console.log(`    soft block      : ${softBlockEnabled ? 'on' : 'off'}`);
-  console.log(`    away-face dim   : ${awayFaceDimEnabled ? 'on' : 'off'}`);
+  console.log(`    grace            : ${graceMs}ms`);
+  console.log(`    soft block       : ${softBlockEnabled ? 'on' : 'off'}`);
+  console.log(`    away-face dim    : ${awayFaceDimEnabled ? 'on' : 'off'}`);
+  console.log(`    multi-face dim   : ${multiFaceDimEnabled ? 'on' : 'off'}`);
 
   const proceed = await confirm('\n  proceed with enrollment?');
   if (!proceed) {
@@ -186,7 +195,7 @@ async function runSetup() {
   }
 
   // Step 1: enroll
-  await runInit({ grace: graceMs, threshold: cfg.DEFAULTS.matchThreshold, softBlock: softBlockEnabled, awayDim: awayFaceDimEnabled });
+  await runInit({ grace: graceMs, threshold: cfg.DEFAULTS.matchThreshold, softBlock: softBlockEnabled, awayDim: awayFaceDimEnabled, multiFaceDim: multiFaceDimEnabled });
 
   // Step 2: install as service
   const install = await confirm('\n  install face-lock as a service (auto-start at login)?');
@@ -226,6 +235,8 @@ async function runInit(opts) {
     awayFaceDimDelayMs: cfg.DEFAULTS.awayFaceDimDelayMs,
     awayFaceDimYawMax: cfg.DEFAULTS.awayFaceDimYawMax,
     awayFaceDimPitchMax: cfg.DEFAULTS.awayFaceDimPitchMax,
+    multiFaceDimEnabled: !!opts.multiFaceDim,
+    multiFaceDimDelayMs: cfg.DEFAULTS.multiFaceDimDelayMs,
   });
   console.log(`  config saved: ${configPath}`);
 
@@ -290,6 +301,7 @@ async function runStart(opts) {
   if (opts.softBlock === false) loaded.softBlockEnabled = false;
   if (opts.camera && opts.camera >= 0) loaded.cameraIndex = opts.camera;
   if (opts.awayDim) loaded.awayFaceDimEnabled = true;
+  if (opts.multiFaceDim) loaded.multiFaceDimEnabled = true;
 
   const cam = new camera.Camera({ index: loaded.cameraIndex });
   let timer = null;

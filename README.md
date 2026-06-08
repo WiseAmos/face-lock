@@ -61,7 +61,8 @@ Flags on `start`:
 | `--threshold <n>` | 0.55 | face-match distance (lower = stricter) |
 | `--no-soft-block` | on | skip display-dim, go straight to OS lock |
 | `--camera <n>` | -1 | camera index (-1 = default) |
-| `--away-dim` | off | shoulder-surfing dim (see below) |
+| `--away-dim` | off | dim when you turn your head >20° for 2 s |
+| `--multi-face-dim` | off | dim when 2+ faces are detected (someone behind you) |
 
 Other commands:
 
@@ -95,14 +96,23 @@ PRESENT ─────────────►  GRACE  ───────
 
 ### Shoulder-surfing dim (opt-in)
 
-If `awayFaceDimEnabled` is on, the monitor also checks **head pose** using the 68-pt landmarks. If your face is present and matched, but your head is turned > ~20° away from the screen for 2+ seconds, the display dims. This catches the case of someone leaning in to read your screen, or you turning to talk to someone next to you.
+Two independent triggers, both off by default. Enable with `--away-dim` and/or `--multi-face-dim` on `start`, or via the `setup` wizard.
 
-**Why opt-in?** It's a 5-landmark heuristic, not a real gaze model. It's prone to false positives (you glance at a second monitor and the screen dims). Try it; if it annoys you, turn it off.
+| flag | what it catches | how it works | false-positive risk |
+|---|---|---|---|
+| `--away-dim` | you turn your head to talk to someone | head-pose from 68-pt landmarks (yaw > 20° or pitch > 23° for 2 s) | low — you have to literally turn away |
+| `--multi-face-dim` | **someone stands behind you** | face-api detects 2+ faces in frame for 2 s | medium — posters, screens, photos of people on your desk can trip it |
+
+Both are **opt-in for a reason** — they're heuristics. The first one is fairly reliable. The second one is coarser: a poster of a celebrity behind you, a video call with another person on screen, or a 2-person selfie on your phone held in the frame can all fire it. The default is "off" so the tool never annoys you. Try it; if it trips too often, leave it off — the OS lock at 15 s is still your backstop.
+
+**What multi-face dim does NOT do** — it does **not** lock the screen, just dims it. Your session keeps running, the dim prevents the onlooker from reading what's there, and when the second face leaves the screen comes back. This is intentional: an attacker standing close enough to be on your webcam is probably also close enough to hear you typing a password, so we don't kick you out of your own session.
+
+**What neither does** — detect a *photo* of your face being held up. The model is 2D geometry; it has no liveness check. If you want liveness, that's a real model upgrade (depth-IR or rPPG / pulse detection), and out of scope for v0.1.
 
 ```bash
-face-lock start --away-dim
+face-lock start --multi-face-dim
 # or in your config:
-echo '{ "awayFaceDimEnabled": true }' > ~/.face-lock/config.json
+echo '{ "multiFaceDimEnabled": true }' > ~/.face-lock/config.json
 ```
 
 ## File layout

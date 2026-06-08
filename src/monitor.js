@@ -23,7 +23,7 @@
 const EventEmitter = require('events');
 const config = require('./config');
 const profile = require('./profile');
-const { detectOne } = require('./detector');
+const { detectAll, detectOne } = require('./detector');
 const lock = require('./lock');
 const overlay = require('./overlay');
 const headpose = require('./headpose');
@@ -88,10 +88,23 @@ class Monitor extends EventEmitter {
     }
     if (!frame) return;
 
-    const result = await this.detect(frame);
+    // Run two detection passes when multi-face dim is enabled; otherwise the
+    // cheaper single-face pass is enough.
+    let result = await this.detect(frame);
+    let faceCount = result ? 1 : 0;
+    let allFaces = null;
+    if (this.cfg.multiFaceDimEnabled) {
+      allFaces = await this._detectAllSafe(frame);
+      if (allFaces) {
+        faceCount = allFaces.count;
+        // If the single-face pass missed (no match), use the largest detected face
+        // as `result` so the existing isMatch / head-pose logic still works.
+        if (!result) result = allFaces.best;
+      }
+    }
     const isYou = this.isMatch(result);
 
-    this.log(2, `face=${!!result} you=${isYou}`);
+    this.log(2, `faces=${faceCount} you=${isYou}`);
 
     if (isYou) {
       this.presentStreak++;
@@ -104,8 +117,9 @@ class Monitor extends EventEmitter {
       } else if (this.state === STATE.LOCKED) {
         // stay locked — face presence cannot override OS lock
       }
-      // Shoulder-surfing dim: face is yours but head is turned away.
-      this.checkAwayDim(result);
+      // Shoulder-surfing dim: two independent triggers, both feed one state.
+      this.checkAwayDim(result);        // you, but head turned away
+      this.checkMultiFaceDim(faceCount, allFaces); // you, but someone else is in frame
     } else {
       this.presentStreak = 0;
       this.clearAwayDim();
@@ -114,6 +128,19 @@ class Monitor extends EventEmitter {
       } else if (this.state === STATE.GRACE) {
         // let the timer expire naturally
       }
+    }
+  }
+
+  /**
+   * Wraps `detector.detectAll` so a missing/empty frame doesn't blow up the
+   * monitor. Returns `null` on any error.
+   */
+  async _detectAllSafe(frame) {
+    try {
+      return await detectAll(frame);
+    } catch (err) {
+      this.log(1, `detectAll error: ${err.message}`);
+      return null;
     }
   }
 
@@ -144,7 +171,38 @@ class Monitor extends EventEmitter {
     if (this.awayStreak * this.cfg.detectionIntervalMs >= this.cfg.awayFaceDimDelayMs && !this.awayDimActive) {
       this.awayDimActive = true;
       this.log(1, 'face off-screen: dimming (awayFaceDim)');
-      this.emit('away-dim');
+      this.emit('away-dim', { reason: 'head-turned-away' });
+      this.sleep();
+    }
+  }
+
+  /**
+   * "Multi-face" handling: your face is on screen (matched), but there are
+   * MORE faces in the frame than just you. This is the "someone is standing
+   * behind you" / shoulder-surfing case. We dim the screen so the onlooker
+   * can't read what's on it.
+   *
+   * Note: this is a coarse signal. A photo of a celebrity on your t-shirt can
+   * occasionally trip it; background posters with face-like features can
+   * cause false positives. That's why it's opt-in and why the threshold
+   * defaults to a 2-second streak (we wait for sustained multi-face presence
+   * before dimming).
+   *
+   * Disabled by default — see `multiFaceDimEnabled` in config.
+   */
+  checkMultiFaceDim(faceCount, allFaces) {
+    if (!this.cfg.multiFaceDimEnabled) return;
+    if (this.state === STATE.LOCKED) return;
+    if (faceCount < 2) {
+      this.awayStreak = 0;
+      this.clearAwayDim();
+      return;
+    }
+    this.awayStreak++;
+    if (this.awayStreak * this.cfg.detectionIntervalMs >= this.cfg.multiFaceDimDelayMs && !this.awayDimActive) {
+      this.awayDimActive = true;
+      this.log(1, `multi-face dim: ${faceCount} faces in frame`);
+      this.emit('away-dim', { reason: 'multi-face', count: faceCount, faces: allFaces && allFaces.detections });
       this.sleep();
     }
   }
@@ -153,7 +211,7 @@ class Monitor extends EventEmitter {
     if (this.awayDimActive) {
       this.awayDimActive = false;
       this.awayStreak = 0;
-      this.log(1, 'face back on-screen: undim');
+      this.log(1, 'dim cleared: back to normal');
       this.emit('away-undim');
     }
   }

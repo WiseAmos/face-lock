@@ -215,3 +215,140 @@ test('away-dim: off by default (opt-in)', async () => {
   assert.equal(events.awayDim, 0, 'away-dim must be disabled by default');
   m.stop();
 });
+
+test('multi-face dim: 2+ faces in frame while you are present → dim', async () => {
+  // single-face pass returns YOU; the multi-face pass sees 2 faces.
+  const events = { awayDim: 0, awayDimReason: null, awayDimCount: 0 };
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      awayFaceDimEnabled: false,
+      multiFaceDimEnabled: true,
+      multiFaceDimDelayMs: 200,
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {},
+    lockFn: () => {},
+    detectFn: async () => ({ detection: {}, descriptor: { label: 'me' } }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  // Override the internal detectAll path:
+  m._detectAllSafe = async () => ({
+    detections: [
+      { detection: { alignedRect: { _box: { x: 0, y: 0, width: 100, height: 100 } } }, descriptor: [] },
+      { detection: { alignedRect: { _box: { x: 200, y: 0, width: 80, height: 80 } } }, descriptor: [] },
+    ],
+    count: 2,
+    best: { detection: {}, descriptor: { label: 'me' } },
+  });
+  m.on('away-dim', (payload) => {
+    events.awayDim++;
+    if (payload) {
+      events.awayDimReason = payload.reason;
+      events.awayDimCount = payload.count;
+    }
+  });
+  m.start();
+  await m.tick();
+  await m.tick();
+  await wait(50);
+  assert.equal(events.awayDim, 1, 'multi-face dim should fire when 2+ faces for >= delay');
+  assert.equal(events.awayDimReason, 'multi-face');
+  assert.equal(events.awayDimCount, 2);
+  assert.equal(m.state, STATE.PRESENT, 'multi-face dim does NOT lock you out');
+  m.stop();
+});
+
+test('multi-face dim: single face → no dim', async () => {
+  const events = { awayDim: 0 };
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      multiFaceDimEnabled: true,
+      multiFaceDimDelayMs: 200,
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    detectFn: async () => ({ detection: {}, descriptor: { label: 'me' } }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m._detectAllSafe = async () => ({
+    detections: [{ detection: {}, descriptor: [] }],
+    count: 1,
+    best: { detection: {}, descriptor: { label: 'me' } },
+  });
+  m.on('away-dim', () => events.awayDim++);
+  m.start();
+  await m.tick(); await m.tick();
+  await wait(50);
+  assert.equal(events.awayDim, 0);
+  m.stop();
+});
+
+test('multi-face dim: off by default (opt-in)', async () => {
+  const events = { awayDim: 0 };
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      multiFaceDimEnabled: false,  // <-- off
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    detectFn: async () => ({ detection: {}, descriptor: { label: 'me' } }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m._detectAllSafe = async () => ({
+    detections: [
+      { detection: {}, descriptor: [] },
+      { detection: {}, descriptor: [] },
+    ],
+    count: 2,
+    best: { detection: {}, descriptor: { label: 'me' } },
+  });
+  m.on('away-dim', () => events.awayDim++);
+  m.start();
+  await m.tick(); await m.tick();
+  await wait(50);
+  assert.equal(events.awayDim, 0, 'multi-face dim must be disabled by default');
+  m.stop();
+});
+
+test('multi-face dim: dim clears when back to 1 face', async () => {
+  const events = { awayDim: 0, awayUndim: 0 };
+  let count = 2;
+  const m = new Monitor({
+    config: {
+      graceMs: 15000, detectionIntervalMs: 100, matchThreshold: 0.55,
+      minPresentFrames: 1, softBlockEnabled: false, cameraIndex: -1, logLevel: 0,
+      multiFaceDimEnabled: true,
+      multiFaceDimDelayMs: 200,
+    },
+    frameSource: { getFrame: async () => ({ __frame: true }) },
+    sleepFn: () => {}, lockFn: () => {},
+    detectFn: async () => ({ detection: {}, descriptor: { label: 'me' } }),
+  });
+  m.profile = realProfile;
+  m.isMatch = () => true;
+  m._detectAllSafe = async () => ({
+    detections: Array.from({ length: count }, () => ({ detection: {}, descriptor: [] })),
+    count,
+    best: { detection: {}, descriptor: { label: 'me' } },
+  });
+  m.on('away-dim',   () => events.awayDim++);
+  m.on('away-undim', () => events.awayUndim++);
+  m.start();
+  await m.tick(); await m.tick();   // streak → dim fires
+  await wait(20);
+  assert.equal(events.awayDim, 1);
+  count = 1;                         // stranger leaves
+  await m.tick();
+  await wait(20);
+  assert.equal(events.awayUndim, 1, 'should undim when back to one face');
+  m.stop();
+});

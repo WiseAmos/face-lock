@@ -19,6 +19,11 @@ const DEFAULTS = Object.freeze({
   awayFaceDimDelayMs: 2000,     // must be off-screen this long before dim
   awayFaceDimYawMax: 0.35,      // ~20° — wider = stricter "off-screen" classification
   awayFaceDimPitchMax: 0.40,    // ~23°
+
+  // Multi-face / "someone behind you" dim (off by default — opt-in)
+  // Triggers when 2+ faces are detected while your face is matched.
+  multiFaceDimEnabled: false,
+  multiFaceDimDelayMs: 2000,    // must be multi-face this long before dim
 });
 
 function defaultConfigPath() {
