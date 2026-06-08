@@ -5,6 +5,27 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-08
+
+### Fixed
+- **Setup wizard crashed at the model-download step** with
+  `HTTP 404 for face_landmark_68_model-shard2`. The landmark model is a
+  single shard upstream (`face_landmark_68_model-shard1`, 349 KB) — there
+  is no `shard2`. The bogus entry in `MODEL_FILES` killed the entire
+  download loop. Dropped.
+
+### Changed
+- **Postinstall auto-launches the setup wizard** (`face-lock setup`).
+  Per user direction: the user should not have to remember to type
+  `facecheck` after installing. Trade-off: non-interactive installs
+  (CI, Docker) will hang on the first prompt and must be aborted with
+  Ctrl-C. Accepted.
+- **Setup wizard now uses arrow-key navigation** for the yes/no choices
+  (↑/↓ to move, Enter to confirm). Same UX as `opencode` / `claude` /
+  `codex`. The wizard also accepts Ctrl-C for a clean exit, and Ctrl-K /
+  Ctrl-J as alternatives to the arrow keys. Falls back to typed-number
+  input when stdin is not a TTY (preserves the smoke test).
+
 ## [0.1.2] - 2026-06-08
 
 ### Fixed

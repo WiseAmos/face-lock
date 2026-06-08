@@ -134,17 +134,92 @@ async function prompt(question, { defaultValue, validator, password = false } = 
   });
 }
 
+/**
+ * Interactive selector. Falls back to typed numbers when stdin is not a TTY
+ * (e.g., CI, smoke tests with redirected stdin). When stdin IS a TTY, the
+ * user navigates with ↑/↓ and confirms with Enter — same UX as `opencode`,
+ * `claude`, etc.
+ */
 async function choose(question, choices, defaultIndex = 0) {
-  console.error(`\n  ${question}`);
-  choices.forEach((c, i) => {
-    const marker = i === defaultIndex ? '●' : '○';
-    process.stderr.write(`    ${marker} ${i + 1}) ${c}\n`);
+  process.stderr.write(`\n  ${question}\n`);
+  if (!process.stdin.isTTY || process.env.FACE_LOCK_TYPED_PROMPT === '1') {
+    // Non-TTY: typed-number fallback (preserves the smoke test path).
+    choices.forEach((c, i) => {
+      const marker = i === defaultIndex ? '●' : '○';
+      process.stderr.write(`    ${marker} ${i + 1}) ${c}\n`);
+    });
+    const v = await prompt('  choose', {
+      defaultValue: String(defaultIndex + 1),
+      validator: (s) => {
+        const n = parseInt(s, 10);
+        return Number.isInteger(n) && n >= 1 && n <= choices.length;
+      },
+    });
+    return choices[parseInt(v, 10) - 1];
+  }
+
+  // TTY: arrow-key navigation.
+  return new Promise((resolve) => {
+    readline.emitKeypressEvents(process.stdin);
+    const wasRaw = process.stdin.isRaw;
+    if (process.stdin.setRawMode) process.stdin.setRawMode(true);
+
+    let i = defaultIndex;
+    const blockHeight = choices.length + 1; // 1 line for the question
+    let firstRender = true;
+
+    const render = () => {
+      if (!firstRender) {
+        // Move cursor up to the question line, then clear from there down.
+        process.stderr.write(`\x1b[${blockHeight}A`);
+        process.stderr.write(`\x1b[0J`);
+      }
+      firstRender = false;
+      process.stderr.write(`\x1b[2K  ${question}\n`);
+      choices.forEach((c, idx) => {
+        const marker = idx === i ? '\x1b[7m ▶ \x1b[0m' : '   '; // reverse-video cursor
+        process.stderr.write(`\x1b[2K${marker} ${idx + 1}) ${c}\n`);
+      });
+    };
+
+    const onKey = (str, key) => {
+      if (!key) return;
+      if (key.name === 'up' || (key.ctrl && key.name === 'k')) {
+        i = (i - 1 + choices.length) % choices.length;
+      } else if (key.name === 'down' || (key.ctrl && key.name === 'j')) {
+        i = (i + 1) % choices.length;
+      } else if (key.name === 'return' || key.name === 'enter' || str === '\r' || str === '\n') {
+        cleanup();
+        // Final selection: rewrite the cursor row with a settled marker.
+        process.stderr.write(`\x1b[${blockHeight}A\x1b[0J`);
+        process.stderr.write(`\x1b[2K  ${question}\n`);
+        choices.forEach((c, idx) => {
+          const marker = idx === i ? ' ●' : ' ○';
+          process.stderr.write(`\x1b[2K${marker} ${idx + 1}) ${c}\n`);
+        });
+        resolve(choices[i]);
+        return;
+      } else if (key.ctrl && key.name === 'c') {
+        cleanup();
+        process.stderr.write('\n');
+        process.exit(130);
+        return;
+      } else {
+        return; // ignore other keys
+      }
+      render();
+    };
+
+    const cleanup = () => {
+      process.stdin.removeListener('keypress', onKey);
+      if (process.stdin.setRawMode) {
+        try { process.stdin.setRawMode(wasRaw); } catch (_) { /* */ }
+      }
+    };
+
+    process.stdin.on('keypress', onKey);
+    render();
   });
-  const v = await prompt('  choose', { defaultValue: String(defaultIndex + 1), validator: (s) => {
-    const n = parseInt(s, 10);
-    return Number.isInteger(n) && n >= 1 && n <= choices.length;
-  } });
-  return choices[parseInt(v, 10) - 1];
 }
 
 async function runSetup() {

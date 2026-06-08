@@ -1,10 +1,24 @@
 'use strict';
 
 /**
- * Post-install message. We do NOT auto-build native modules (canvas) because
- * that takes minutes and many users will only use the CLI. The detector only
- * needs canvas + face-api.js at `init`/`start` time, not at install time.
+ * Post-install: auto-launches the setup wizard.
+ *
+ * Per user direction: the wizard should start automatically after
+ * `npm install -g face-lock`. This means non-interactive installs (CI,
+ * Docker, piped stdin) will hang on the first prompt. That's accepted
+ * as a trade-off — the alternative is making the user remember to type
+ * `facecheck` after every install, which is the friction we are
+ * explicitly choosing to remove.
+ *
+ * The wizard itself falls back to typed-number input when stdin is not
+ * a TTY, so the install will at least print all its options and wait
+ * for the user to type a number. In a true CI context the install will
+ * time out; in an interactive shell the user is one keystroke away from
+ * being enrolled.
  */
+
+const path = require('path');
+const { spawnSync } = require('child_process');
 
 const pkg = require('../package.json');
 
@@ -14,23 +28,12 @@ const lines = [
   `  │  face-lock ${pkg.version} installed                          │`,
   `  ╰─────────────────────────────────────────────────────────╯`,
   '',
-  '  Quick start (the short way):',
-  '    1) facecheck          # runs setup the first time, then starts the monitor',
-  '    2) facecheck status   # see if it\'s running',
-  '    3) facecheck stop     # stop the running monitor',
-  '',
-  '  Long form (every flag exposed):',
-  '    1) face-lock init     # enroll your face (one-time)',
-  '    2) face-lock start    # monitor (foreground, for testing)',
-  '    3) face-lock install  # run at login as a service',
-  '',
-  '  First-run notes:',
-  '    - Camera permissions may be required on macOS / Windows.',
-  '    - The `init` step downloads ~17MB of face detection models',
-  '      to ~/.face-lock/models (one-time, then cached).',
-  '    - No native build step required: face-lock uses @napi-rs/canvas,',
-  '      which ships prebuilt binaries for Windows / macOS / Linux on',
-  '      Node 18, 20, 22, and 24.',
+  '  Launching setup wizard...',
   '',
 ];
 for (const l of lines) process.stdout.write(l + '\n');
+
+// Hand off to the wizard; pass through stdio so the user sees it.
+const cli = path.join(__dirname, '..', 'bin', 'face-lock.js');
+const r = spawnSync(process.execPath, [cli, 'setup'], { stdio: 'inherit' });
+process.exit(r.status == null ? 0 : r.status);
