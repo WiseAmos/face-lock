@@ -5,6 +5,28 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.6] - 2026-06-09
+
+### Fixed
+- **face-api.js now accepts our Canvas/Image inputs.** The previous release (alpha.5) fixed the camera capture path on Windows, but the next call (`face-api.js`'s `detectSingleFace`) threw `toNetInput - expected media to be of type HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | tf.Tensor3D, or to be an element id` even though we were passing an `@napi-rs/canvas` `CanvasElement` (which is the right DOM-like class).
+  - **Root cause:** face-api.js's Node env (`createNodejsEnv.js`) initialises its `instanceof` checks by reading `global.Canvas` / `global.Image` / `global.HTMLCanvasElement`. `@napi-rs/canvas` does **not** register itself on `global` — you have to `require('@napi-rs/canvas')` and use the exported classes. So `isMediaElement()` always returned `false` for our inputs, and the catch-all throw fired.
+  - **Fix:** new `registerCanvasGlobals()` in `src/detector.js` runs once on first `detectOne` / `detectAll` call, imports `@napi-rs/canvas`, and assigns `c.Canvas` / `c.Image` / `CanvasElement` to `global.Canvas` / `global.Image` / `global.HTMLCanvasElement`. face-api.js's `isMediaElement()` then returns `true` for our DOM-like inputs and `detectSingleFace` proceeds.
+  - Also added a `decodeInput()` dispatcher that accepts a JPEG file path, raw `Buffer`, or DOM-like object — it loads paths/buffers via `loadImage()` from `@napi-rs/canvas` and returns the resulting `Image`. DOM-like inputs (including the existing `loadImageAsCanvas` flow in `bin/face-lock.js`) pass through unchanged.
+
+### Tests
+- 7 new tests for the `decodeInput` dispatcher and the `registerCanvasGlobals` registration:
+  - `@napi-rs/canvas` Image class is named `Image` (the dispatch table depends on this)
+  - `@napi-rs/canvas` Canvas is named `CanvasElement` (not `Canvas` — the public class is the factory)
+  - Plain `Buffer` / `string` / `null` / `undefined` / `{}` are correctly classified as **not** DOM-like
+  - `loadImage()` actually decodes a real JPEG (skippable via `FACE_LOCK_SKIP_CANVAS_LOAD=1` on platforms where the napi binding's bundled libjpeg crashes — not a real issue on Windows prebuilds)
+  - After `detectOne` is called, `global.Canvas` / `global.Image` / `global.HTMLCanvasElement` are populated and `loadImage` results are `instanceof global.Image` — proving face-api.js's `isMediaElement` check will pass.
+- Full suite: **76/76 pass, 1 skip** (was 70/70; +6 from new tests, +1 from the SIGSEGV-on-Linux-only JPEG decode check).
+
+### Notes
+- **Why this is alpha.6 and not just merged into alpha.5:** alpha.5 was the camera fix, alpha.6 is the detector fix. The pattern of one-issue-per-alpha makes it easy to roll back the right change if Windows retesting surfaces a new issue.
+- **No new native deps.** We already had `@napi-rs/canvas` in `package.json` (it's a prebuilt napi binary — no `node-gyp` step on any platform). The fix just wires it into face-api.js's env via `global`.
+- **No code-path changes for users whose init succeeded before.** Only the first call to `detectOne` / `detectAll` after `loadModels` triggers `registerCanvasGlobals`, and it's idempotent (guarded by `_canvasRegistered`).
+
 ## [0.2.0-alpha.5] - 2026-06-09
 
 ### Fixed

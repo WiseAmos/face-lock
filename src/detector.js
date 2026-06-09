@@ -6,7 +6,7 @@
  * Why face-api.js and not @vladmandic/face-api? face-api.js is the canonical
  * MIT implementation. It needs:
  *   1. TF.js (loaded by face-api.js itself)
- *   2. node-canvas (npm dep)
+ *   2. node-canvas (npm dep) — we use @napi-rs/canvas (prebuilt, no compile)
  *   3. Pre-trained model files in a local directory
  *
  * Model files (ssdMobilenetv1 + faceLandmark68Net + faceRecognitionNet) come
@@ -53,7 +53,8 @@ function downloadFile(url, dest) {
       }
       if (res.statusCode !== 200) {
         file.close();
-        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        fs.unlink(dest, () => reject(new Error(`HTTP ${res.statusCode} for ${url}`)));
+        return;
       }
       res.pipe(file);
       file.on('finish', () => file.close(resolve));
@@ -105,12 +106,89 @@ async function getDetector(opts = {}) {
 }
 
 /**
- * Detect a single face in an HTMLCanvasElement / HTMLImageElement.
+ * Decode a JPEG file (path or Buffer) into something face-api.js can
+ * accept: an HTMLImageElement-compatible object. face-api.js's
+ * internal toNetInput() throws if the input is "a file path or
+ * raw buffer" — it wants a DOM element or a tf.Tensor3D.
+ *
+ * face-api.js's Node env (createNodejsEnv.js) checks
+ * `global.Canvas` and `global.Image` to figure out what classes
+ * to `instanceof`-check against in isMediaElement(). @napi-rs/canvas
+ * does NOT register itself on global — you have to import it. So we
+ * import the classes here and assign them to `global` on first use;
+ * face-api.js's isMediaElement() will then return true for our
+ * Image/CanvasElement instances.
+ *
+ * Accepts:
+ *   - string (file path)
+ *   - Buffer (raw JPEG bytes)
+ *   - HTMLImageElement-compatible object (passed through, no-op)
+ */
+let _canvasRegistered = false;
+function registerCanvasGlobals() {
+  if (_canvasRegistered) return;
+  // eslint-disable-next-line global-require
+  const c = require('@napi-rs/canvas');
+  // face-api.js createNodejsEnv.js looks at global.Canvas / global.Image
+  if (!global.Canvas && c.Canvas) global.Canvas = c.Canvas;
+  if (!global.Image && c.Image) global.Image = c.Image;
+  // Also expose the concrete class returned by createCanvas, since
+  // @napi-rs/canvas wraps it: the public Canvas is the factory, but
+  // createCanvas() returns a CanvasElement (different class).
+  if (!global.HTMLCanvasElement) {
+    const probe = c.createCanvas(1, 1);
+    global.HTMLCanvasElement = probe.constructor;
+  }
+  _canvasRegistered = true;
+}
+
+async function decodeInput(input) {
+  registerCanvasGlobals();
+
+  // Already a DOM-like element (e.g. tf.Tensor3D, HTMLCanvasElement)?
+  if (input && typeof input === 'object' && !(Buffer.isBuffer(input)) &&
+      typeof input === 'object' && (input.constructor && (
+        input.constructor.name === 'Tensor' ||
+        input.constructor.name === 'HTMLImageElement' ||
+        input.constructor.name === 'HTMLCanvasElement' ||
+        input.constructor.name === 'HTMLVideoElement' ||
+        // @napi-rs/canvas: Image class is named 'Image', Canvas is 'CanvasElement'
+        input.constructor.name === 'Image' ||
+        input.constructor.name === 'CanvasElement'
+      ))) {
+    return input;
+  }
+
+  // eslint-disable-next-line global-require
+  const { loadImage } = require('@napi-rs/canvas');
+
+  let buf;
+  if (Buffer.isBuffer(input)) {
+    buf = input;
+  } else if (typeof input === 'string') {
+    buf = fs.readFileSync(input);
+  } else if (input && input.buffer && Buffer.isBuffer(input.buffer)) {
+    // Uint8Array / typed array
+    buf = Buffer.from(input.buffer, input.byteOffset || 0, input.byteLength || input.buffer.byteLength);
+  } else {
+    throw new Error(
+      `decodeInput: unsupported input type ${input && input.constructor ? input.constructor.name : typeof(input)} — ` +
+      'expected a file path string, Buffer, or DOM element'
+    );
+  }
+
+  const img = await loadImage(buf);
+  return img;
+}
+
+/**
+ * Detect a single face in a JPEG file path / Buffer / DOM element.
  * Returns { detection, descriptor } or null.
  */
 async function detectOne(input) {
   const faceApi = await loadModels();
-  const detection = await faceApi.detectSingleFace(input).withFaceLandmarks().withFaceDescriptor();
+  const decoded = await decodeInput(input);
+  const detection = await faceApi.detectSingleFace(decoded).withFaceLandmarks().withFaceDescriptor();
   if (!detection) return null;
   return {
     detection,
@@ -133,8 +211,9 @@ async function detectOne(input) {
  */
 async function detectAll(input) {
   const faceApi = await loadModels();
+  const decoded = await decodeInput(input);
   const results = await faceApi
-    .detectAllFaces(input)
+    .detectAllFaces(decoded)
     .withFaceLandmarks()
     .withFaceDescriptors();
   if (!results || results.length === 0) return null;
