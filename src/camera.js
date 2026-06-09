@@ -6,23 +6,37 @@
  * Returns a path to a saved JPEG. The detector then loads that JPEG.
  *
  * Strategy (in order of preference):
- *   0. `face-lock-camera` — native NAPI binding (v0.2.0+). Rust + nokhwa
- *      over V4L2 (Linux) / MSMF (Windows) / AVFoundation (macOS). The
- *      fastest and most reliable path on real hardware — no shell-spawn
- *      overhead, no friendly-name guessing. Loaded lazily via
- *      `require('face-lock-camera')`; if the native binary is missing
- *      (unsupported platform, or user has a pre-v0.2.0 install) we
- *      silently fall through.
- *   1. `ffmpeg-static`'s bundled ffmpeg binary (works on Win/Mac/Linux
- *      out of the box, no system install required). This is the whole
- *      point of the dep — without it, fresh users hit "spawn ffmpeg
- *      ENOENT" and the wizard dies before they can do anything useful.
+ *   0. `face-lock-camera` — native NAPI binding. v0.3.x+ only. Rust +
+ *      nokhwa over V4L2 (Linux) / MSMF (Windows) / AVFoundation (macOS).
+ *      The fastest and most reliable path on real hardware — no
+ *      shell-spawn overhead, no friendly-name guessing. Loaded lazily
+ *      via `require('face-lock-camera')`; if the native binary is
+ *      missing we silently fall through. v0.2.0-alpha.3 forces this
+ *      path OFF (see `nativeEnabled` below) because we don't ship
+ *      prebuilt binaries yet.
+ *   1. Bundled ffmpeg binary in `bin/ffmpeg/<platform>-<arch>/`. This
+ *      is the PRIMARY capture path for v0.2.0-alpha.3. Vendored
+ *      directly in the npm tarball (no install-time download) so
+ *      `npm i -g face-lock` Just Works on Win/Mac/Linux without
+ *      users having to install ffmpeg themselves. See
+ *      `src/ffmpeg-bin.js` for the resolver.
  *   2. A system `ffmpeg` on PATH (Linux distros where the user
- *      installed it via apt/brew).
+ *      installed it via apt/brew, or via the postinstall wizard's
+ *      "install ffmpeg" prompt — though we don't do that yet).
  *   3. On macOS, `imagesnap` (legacy fallback — usually absent on
  *      modern Macs, hence the priority order).
  *   4. `node-webcam` (legacy) — kept in the fallback chain for
  *      completeness.
+ *
+ * Why we vendor ffmpeg instead of depending on ffmpeg-static:
+ *   ffmpeg-static's postinstall downloads a binary from GitHub
+ *   releases. That download fails for ~5% of users (rate limits,
+ *   corporate firewalls, antivirus blocking the .gz, the GitHub
+ *   release asset 404s, etc.). When it fails, the user sees a
+ *   cryptic ENOENT on `ffmpeg` and we can't help them. Vendoring
+ *   the binary in the tarball trades ~80MB of tarball size for
+ *   zero install-time network = reliable install on every
+ *   supported platform.
  *
  * Windows dshow device name:
  *   ffmpeg's dshow backend requires the *exact* friendly name of the
@@ -37,17 +51,11 @@
  * platform binary path, and the exact `ffmpeg` command that was tried,
  * so the user can debug without grepping source.
  *
- * Native module opt-out:
- *   Tests run on machines that may not have a webcam and definitely
- *   don't want a native module load. The Camera constructor accepts
- *   `_useNative: false` (default in tests) to skip the native path
- *   entirely. End users get `_useNative: true` (default when not
- *   explicitly set) so the v0.2.0 fast path is on by default.
- *
- *   The native path is also auto-disabled if:
- *   - `FACE_LOCK_NO_NATIVE=1` is in the environment (escape hatch)
- *   - `require('face-lock-camera')` throws (binary missing)
- *   - `tryOpen()` returns null (no device / busy / permission denied)
+ * Native module opt-out (v0.2.x):
+ *   v0.2.0-alpha.3 does NOT ship the native module. `nativeEnabled`
+ *   hard-returns `false` for this release. The constructor option
+ *   `_useNative: false|true` and the env var `FACE_LOCK_NO_NATIVE=1`
+ *   are preserved so v0.3.x is a one-line change away.
  */
 
 const fs = require('fs');
@@ -55,13 +63,14 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-let bundledFfmpeg = null;
-try {
-  // eslint-disable-next-line global-require
-  bundledFfmpeg = require('ffmpeg-static');
-} catch (_) {
-  // ffmpeg-static not installed (dev-time only)
-}
+// Bundled ffmpeg binary. We vendor the binary directly in the npm
+// tarball (bin/ffmpeg/<platform>-<arch>/) instead of depending on
+// ffmpeg-static — ffmpeg-static's install-time download from GitHub
+// releases fails for ~5% of users (rate limits, corporate firewalls,
+// antivirus), and we don't want install-hangs. See
+// src/ffmpeg-bin.js for the resolver.
+const ffmpegBin = require('./ffmpeg-bin');
+const bundledFfmpeg = ffmpegBin.bundledFfmpegPath();
 
 let nodeWebcam = null;
 try {
@@ -91,8 +100,26 @@ const NATIVE_OPT_OUT_ENV = 'FACE_LOCK_NO_NATIVE';
 /**
  * Returns true if the native code path should be tried.
  *
- * The constructor option is `_useNative`:
- *   - `_useNative: true`  → use native (default behavior)
+ * v0.2.0-alpha.3 does NOT ship the `face-lock-camera` binary in the
+ * npm tarball (the per-platform prebuilds land in v0.3.x). We detect
+ * that the binary is "actually usable" by trying to `require.resolve`
+ * the package:
+ *
+ *   - resolve succeeds (package is on disk)         → use the real logic:
+ *       constructor opt-out, env var escape hatch
+ *   - resolve throws (package not installed)        → return false
+ *       (the v0.2.x production install case)
+ *
+ * This means:
+ *   - npm-published v0.2.0-alpha.3 (no native dep)
+ *     → nativeEnabled always returns false → bundled ffmpeg is used.
+ *   - Dev / test checkout with the `file:./crates/face-lock-camera`
+ *     dep → nativeEnabled respects the original logic, so the
+ *     existing native-path tests still exercise the code.
+ *
+ * Constructor option is `_useNative`:
+ *   - `_useNative: true`  → use native (default behavior when
+ *                            the module is installed)
  *   - `_useNative: false` → skip native, go straight to ffmpeg
  *   - `_useNative: undefined` → use native unless env var opts out
  *
@@ -100,6 +127,15 @@ const NATIVE_OPT_OUT_ENV = 'FACE_LOCK_NO_NATIVE';
  * forces ffmpeg-only mode regardless of the constructor option.
  */
 function nativeEnabled(useNative) {
+  let installed = false;
+  try {
+    // eslint-disable-next-line global-require
+    require.resolve('face-lock-camera');
+    installed = true;
+  } catch (_) {
+    installed = false;
+  }
+  if (!installed) return false; // v0.2.x production: always fall through
   if (useNative === false) return false; // explicit opt-out
   // any other value (true or undefined) → default on, but env var
   // can still disable it

@@ -14,6 +14,10 @@ const os = require('os');
 //   - sleeps (forces a timeout)
 //
 // We use this to verify the fallback chain tries each candidate in order.
+//
+// v0.2.0-alpha.3: the camera module no longer requires ffmpeg-static
+// — it uses ./ffmpeg-bin to resolve a vendored binary. We stub THAT
+// instead by overriding `bundledFfmpegPath` in the module exports.
 
 function makeFakeFfmpeg(script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-fake-ffmpeg-'));
@@ -26,18 +30,53 @@ function cleanupFake(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
 }
 
+/**
+ * Stubs the ffmpeg-bin resolver to return `fakeBin` from
+ * `bundledFfmpegPath()`. Also clears the camera module's
+ * require.cache entry so the new export is picked up.
+ *
+ * Returns an unstub() function the caller should call in `finally`.
+ *
+ * Why we stub the module and not a binary file:
+ *   The new ffmpeg-bin module returns null when the expected binary
+ *   file doesn't exist (graceful dev-mode behavior). To force a
+ *   specific binary path, we have to override the export.
+ */
+function stubBundledFfmpeg(fakeBin) {
+  const ffmpegBinPath = require.resolve('../src/ffmpeg-bin');
+  const origCacheEntry = require.cache[ffmpegBinPath];
+  // The real module's exports object — we want to preserve
+  // supportedPlatforms() etc., only override bundledFfmpegPath.
+  const realMod = origCacheEntry && origCacheEntry.exports;
+  const stubMod = realMod ? Object.create(realMod) : {};
+  stubMod.bundledFfmpegPath = () => fakeBin;
+  // Bundled version reporter shouldn't matter for the capture
+  // chain, but make it consistent: return a fixed string when the
+  // fake binary is provided.
+  stubMod.bundledFfmpegVersion = () => 'ffmpeg version 99.0.0-fake';
+  require.cache[ffmpegBinPath] = {
+    id: ffmpegBinPath,
+    filename: ffmpegBinPath,
+    loaded: true,
+    exports: stubMod,
+    children: [],
+    paths: [],
+  };
+  return () => {
+    delete require.cache[ffmpegBinPath];
+    delete require.cache[require.resolve('../src/camera')];
+    if (origCacheEntry) require.cache[ffmpegBinPath] = origCacheEntry;
+  };
+}
+
 test('camera: bundled ffmpeg succeeds → resolve with dest', async () => {
   // Linux v4l2 arg layout (10 args, dest is the 10th):
   //   -f v4l2 -video_size WxH -i /dev/video0 -frames:v 1 -y <dest>
   // In sh, $0 is the script name and the args are $1..$10, so $10 is the dest.
   const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
-  const ffmpegStaticPath = require.resolve('ffmpeg-static');
-  const orig = require.cache[ffmpegStaticPath];
-  require.cache[ffmpegStaticPath] = { exports: f.bin };
+  const unstub = stubBundledFfmpeg(f.bin);
   try {
     delete require.cache[require.resolve('../src/camera')];
-    delete require.cache[ffmpegStaticPath];
-    require.cache[ffmpegStaticPath] = { exports: f.bin };
     const { Camera } = require('../src/camera');
     const c = new Camera({ index: 0 });
     const dest = await c.capture();
@@ -46,22 +85,16 @@ test('camera: bundled ffmpeg succeeds → resolve with dest', async () => {
     assert.ok(fs.statSync(dest).size > 0, 'dest should be non-empty');
     c.stop();
   } finally {
-    delete require.cache[ffmpegStaticPath];
-    delete require.cache[require.resolve('../src/camera')];
-    if (orig) require.cache[ffmpegStaticPath] = orig;
+    unstub();
     cleanupFake(f.dir);
   }
 });
 
 test('camera: all candidates fail → reject with actionable error', async () => {
   const f = makeFakeFfmpeg('exit 1'); // bundled ffmpeg always fails
-  const ffmpegStaticPath = require.resolve('ffmpeg-static');
-  const orig = require.cache[ffmpegStaticPath];
-  require.cache[ffmpegStaticPath] = { exports: f.bin };
+  const unstub = stubBundledFfmpeg(f.bin);
   try {
     delete require.cache[require.resolve('../src/camera')];
-    delete require.cache[ffmpegStaticPath];
-    require.cache[ffmpegStaticPath] = { exports: f.bin };
     const { Camera } = require('../src/camera');
     const c = new Camera({ index: 0 });
     await assert.rejects(
@@ -81,9 +114,7 @@ test('camera: all candidates fail → reject with actionable error', async () =>
     );
     c.stop();
   } finally {
-    delete require.cache[ffmpegStaticPath];
-    delete require.cache[require.resolve('../src/camera')];
-    if (orig) require.cache[ffmpegStaticPath] = orig;
+    unstub();
     cleanupFake(f.dir);
   }
 });
@@ -135,14 +166,10 @@ test('camera: _resolveDshowDevice is a no-op on non-Windows', () => {
 });
 
 test('camera: bundled ffmpeg missing the binary path → fall through', async () => {
-  const ffmpegStaticPath = require.resolve('ffmpeg-static');
-  const orig = require.cache[ffmpegStaticPath];
-  // Point at a path that does NOT exist
-  require.cache[ffmpegStaticPath] = { exports: '/nonexistent/ffmpeg' };
+  // v0.2.0-alpha.3: stub ffmpeg-bin to return a nonexistent path.
+  const unstub = stubBundledFfmpeg('/nonexistent/ffmpeg');
   try {
     delete require.cache[require.resolve('../src/camera')];
-    delete require.cache[ffmpegStaticPath];
-    require.cache[ffmpegStaticPath] = { exports: '/nonexistent/ffmpeg' };
     const { Camera } = require('../src/camera');
     const c = new Camera({ index: 0 });
     // System ffmpeg likely doesn't exist in CI either; expect the final error.
@@ -152,18 +179,16 @@ test('camera: bundled ffmpeg missing the binary path → fall through', async ()
     });
     c.stop();
   } finally {
-    delete require.cache[ffmpegStaticPath];
-    delete require.cache[require.resolve('../src/camera')];
-    if (orig) require.cache[ffmpegStaticPath] = orig;
+    unstub();
   }
 });
 
 // =====================================================================
 // Native path (face-lock-camera) tests.
 //
-// These tests stub both the `face-lock-camera` module AND
-// `ffmpeg-static` via require.cache to verify the native code path in
-// src/camera.js handles all five outcomes:
+// These tests stub both the `face-lock-camera` module AND the
+// `ffmpeg-bin` resolver via require.cache to verify the native code
+// path in src/camera.js handles all five outcomes:
 //   1. FACE_LOCK_NO_NATIVE=1                   → skip native entirely
 //   2. require('face-lock-camera') throws      → fall through to ffmpeg
 //   3. tryOpen() returns null                  → fall through to ffmpeg
@@ -181,7 +206,10 @@ test('camera: bundled ffmpeg missing the binary path → fall through', async ()
 
 const NATIVE_MODULE_ID = 'face-lock-camera';
 const NATIVE_STUB_PATH = path.join(__dirname, '_native_stub.js');
-const FFMPEG_STATIC_PATH = require.resolve('ffmpeg-static');
+// v0.2.0-alpha.3: the camera module resolves its bundled ffmpeg via
+// ./ffmpeg-bin (a vendored binary), not ffmpeg-static. We stub the
+// ffmpeg-bin module's bundledFfmpegPath() to return the fake script.
+const FFMPEG_BIN_PATH = require.resolve('../src/ffmpeg-bin');
 const CAMERA_PATH = require.resolve('../src/camera');
 
 // Write a minimal stub file ONCE. Its contents are never actually
@@ -255,18 +283,26 @@ function stubNative(stubExports) {
 }
 
 function stubFfmpegStatic(binPath) {
-  require.cache[FFMPEG_STATIC_PATH] = {
-    id: FFMPEG_STATIC_PATH,
-    filename: FFMPEG_STATIC_PATH,
+  // v0.2.0-alpha.3: stub the new ffmpeg-bin resolver. We keep the
+  // function name `stubFfmpegStatic` so existing call sites don't
+  // change, but the underlying mechanism is different.
+  const origCacheEntry = require.cache[FFMPEG_BIN_PATH];
+  const realMod = origCacheEntry && origCacheEntry.exports;
+  const stubMod = realMod ? Object.create(realMod) : {};
+  stubMod.bundledFfmpegPath = () => binPath;
+  stubMod.bundledFfmpegVersion = () => 'ffmpeg version 99.0.0-fake';
+  require.cache[FFMPEG_BIN_PATH] = {
+    id: FFMPEG_BIN_PATH,
+    filename: FFMPEG_BIN_PATH,
     loaded: true,
-    exports: binPath,
+    exports: stubMod,
     children: [],
     paths: [],
   };
 }
 
 function resetFfmpegStatic() {
-  delete require.cache[FFMPEG_STATIC_PATH];
+  delete require.cache[FFMPEG_BIN_PATH];
 }
 
 function freshCamera() {

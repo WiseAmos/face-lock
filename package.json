@@ -1,6 +1,6 @@
 {
   "name": "face-lock",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "description": "Auto-lock your laptop when you walk away. Face-recognition powered, cross-platform (macOS, Windows, Linux).",
   "main": "src/index.js",
   "bin": {
@@ -13,7 +13,6 @@
     "scripts",
     "assets",
     "models",
-    "crates",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -23,7 +22,6 @@
     "init": "node bin/face-lock.js init",
     "test": "node --test test/*.test.js",
     "smoke": "node scripts/smoke.js",
-    "build:native": "node scripts/build-native.js",
     "prepublishOnly": "npm test && npm run smoke",
     "postinstall": "node scripts/postinstall.js"
   },
@@ -60,8 +58,6 @@
     "@napi-rs/canvas": "^1.0.0",
     "commander": "^12.1.0",
     "face-api.js": "^0.22.2",
-    "face-lock-camera": "file:./crates/face-lock-camera",
-    "ffmpeg-static": "^5.3.0",
     "systeminformation": "^5.23.5"
   },
   "devDependencies": {

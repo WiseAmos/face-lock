@@ -217,24 +217,35 @@ npm test                # node --test test/*.test.js
 node scripts/smoke.js   # CLI sanity check
 ```
 
-### Building the native camera module (optional)
+### Native camera module (v0.3.x)
 
-v0.2.0-alpha.2 ships an optional Rust + napi-rs camera binding
+v0.3.0 will ship an optional Rust + napi-rs camera binding
 (`crates/face-lock-camera/`) that talks directly to V4L2/MSMF/AVFoundation.
-Prebuilt `.node` binaries are attached to each GitHub release, so end users
-**do not** need Rust installed. Contributors hacking on the Rust source:
+Prebuilt `.node` binaries will be attached to each GitHub release, so end
+users **will not** need Rust installed.
+
+**v0.2.0-alpha.3 does NOT ship the native module.** It uses the bundled
+ffmpeg binary (see below) as the primary capture path. The Rust source
+tree is preserved on disk for v0.3.x work.
 
 ```bash
-# One-time: install Rust from https://rustup.rs
+# In v0.3.x (one-time, contributors only):
 npm run build:native    # builds + installs the binary into node_modules/
 FACE_LOCK_NO_NATIVE=0   # default — native is tried first
 FACE_LOCK_NO_NATIVE=1   # force the ffmpeg fallback (debug)
 ```
 
-The CI matrix in `.github/workflows/build-native.yml` builds the same
-target list as `napi.targets` in `crates/face-lock-camera/package.json`
-(Linux x64+arm64, macOS x64+arm64, Windows x64+arm64) and attaches the
-binaries to the GitHub release on `v*` tag pushes.
+### Bundled ffmpeg
+
+v0.2.0-alpha.3 vendors ffmpeg binaries directly in the npm tarball
+(`bin/ffmpeg/<platform>-<arch>/`). Five platforms are supported:
+linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64. There is
+no install-time network download and no separate ffmpeg install
+required. The version is reported by:
+
+```bash
+node -e "console.log(require('face-lock/src/ffmpeg-bin').bundledFfmpegVersion())"
+```
 
 ## License
 

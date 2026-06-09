@@ -5,6 +5,32 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.3] - 2026-06-09
+
+### Added
+- **Vendored ffmpeg binaries.** Five platform-specific static ffmpeg builds are now bundled directly in the npm tarball under `bin/ffmpeg/<platform>-<arch>/`:
+  - `linux-x64`   — ffmpeg 7.0.2 (johnvansickle.com static), has v4l2
+  - `linux-arm64` — ffmpeg 7.0.2, has v4l2
+  - `darwin-x64`  — ffmpeg 6.0, has avfoundation
+  - `darwin-arm64`— ffmpeg 6.0, has avfoundation
+  - `win32-x64`   — ffmpeg 6.0, has dshow
+  Total unpacked: ~321 MB, total gzipped: ~129 MB (well under npm's 250 MB limit).
+- **`src/ffmpeg-bin.js` resolver.** A new internal module that returns the absolute path to the vendored binary for the current `process.platform` + `process.arch` combo, or `null` on unsupported platforms or if the file is missing. Exposes `bundledFfmpegPath()`, `bundledFfmpegVersion()`, and `supportedPlatforms()`.
+- **9 new unit tests** for the resolver (see `test/ffmpeg-bin.test.js`): path on supported platforms, null on unsupported, null when binary missing, graceful version reporter, platform list shape, internal `_PLATFORM_DIRS` consistency, `_BINARY_NAME` is platform-correct, end-to-end path shape.
+- **TTY-aware postinstall.** `scripts/postinstall.js` now only runs the setup wizard when **both** `process.stdin.isTTY` and `process.stdout.isTTY` are true. Non-interactive installs (CI, Docker, scripted `npm install -g face-lock`) get a single-line hint and exit 0 — no more hangs at "loading" when the postinstall hits a non-TTY npm install.
+
+### Changed
+- **`ffmpeg-static` dependency removed.** We vendor ffmpeg directly in the tarball instead. The old dep downloads a binary from GitHub releases at install time, which fails for ~5% of users (rate limits, corporate firewalls, antivirus blocking the `.gz`, GitHub 404s). With vendored binaries, `npm i -g face-lock` Just Works on every supported platform with zero install-time network.
+- **Native camera module deferred to v0.3.x.** The `face-lock-camera` Rust+napi-rs module that 0.2.0-alpha.2 introduced is **not shipped** in 0.2.0-alpha.3. The dep, the `crates/` source tree, and the `build:native` script are all removed from the npm tarball (kept on disk for v0.3.x work). `nativeEnabled()` in `src/camera.js` detects whether the package is installed via `require.resolve('face-lock-camera')` — if not (the npm-install case), it returns `false` and the bundled ffmpeg path is used. If the package IS on disk (dev/test checkout with the `file:` dep), the original opt-out logic still works, so the existing 7 native-path tests continue to pass.
+
+### Fixed
+- **Postinstall hang in non-TTY installs.** 0.1.4 and 0.2.0-alpha.2 would block forever at "loading" when run from `npm i -g` in a non-TTY environment (e.g. a fresh Windows cmd.exe from a package manager, or a CI run). The fix is a single `isInteractive` check that turns the wizard off and prints a hint instead. Users can still run `facecheck` manually from a real terminal.
+
+### Notes
+- This is still an **alpha**. The vendored ffmpeg binaries are verified to exist + be the right platform combo, but they haven't been exercised on real webcam hardware in CI yet. The first install on a fresh Windows/Mac/Linux box should just work — but if you see a ffmpeg-related error, please open an issue with the output of `node -e "console.log(require('face-lock/src/ffmpeg-bin').bundledFfmpegVersion())"`.
+- The native camera module lands in v0.3.x with prebuilt `.node` binaries per platform (the CI workflow from 0.2.0-alpha.2 is preserved on disk and will be re-attached to the repo when we add a `workflow`-scoped token).
+- Tarball size: ~132 MB packed, ~337 MB unpacked. The unpacked size shows up in `npm install` output as a warning at >250 MB; this is fine, but if we add more platform variants we should consider a smaller fallback (e.g. only shipping the binary for the user's current `process.platform` via an `optionalDependencies` postinstall download).
+
 ## [0.2.0-alpha.2] - 2026-06-09
 
 ### Added
