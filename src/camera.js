@@ -16,6 +16,15 @@
  *      Macs, hence the priority order).
  *   4. `node-webcam` (legacy) — kept in the fallback chain for completeness.
  *
+ * Windows dshow device name:
+ *   ffmpeg's dshow backend requires the *exact* friendly name of the camera
+ *   (e.g. "HD Webcam", "Integrated Camera", "USB2.0 HD UVC WebCam"). The
+ *   "USB Camera" default that 0.1.4 hardcoded rarely matches real devices,
+ *   which caused "ffmpeg ran but produced 0-byte output → fallback exhausted"
+ *   errors. On Windows we now probe `ffmpeg -list_devices true -f dshow -i
+ *   dummy` at first capture and use the first video device we find. Cached
+ *   on the Camera instance.
+ *
  * If everything fails, throws an error that includes the OS, the platform
  * binary path, and the exact `ffmpeg` command that was tried, so the user
  * can debug without grepping source.
@@ -24,7 +33,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 let bundledFfmpeg = null;
 try {
@@ -48,12 +57,16 @@ class Camera {
     width = 320,
     height = 240,
     outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'face-lock-')),
+    // Inject for tests: skip the device probe
+    _probeDshowDevices = true,
   } = {}) {
     this.index = index;
     this.width = width;
     this.height = height;
     this.outputDir = outputDir;
     this.lastTried = null; // for error messages
+    this._probeDshowDevices = _probeDshowDevices;
+    this._dshowDevice = null; // cached after first probe
   }
 
   async capture() {
@@ -95,8 +108,12 @@ class Camera {
    * Build the ffmpeg command for the current platform.
    * Windows: DirectShow. macOS/Linux: avfoundation / v4l2.
    * On macOS we also accept the legacy "USB Camera" device name.
+   *
+   * `win32DeviceName` (used only on win32) is the friendly name of the dshow
+   * device — we default to "USB Camera" but the caller should normally have
+   * resolved it via `_resolveDshowDevice()` first.
    */
-  ffmpegArgs(dest) {
+  ffmpegArgs(dest, win32DeviceName) {
     const w = this.width;
     const h = this.height;
     const idx = this.index >= 0 ? this.index : 0;
@@ -122,7 +139,7 @@ class Camera {
       case 'win32':
         return [
           '-f', 'dshow',
-          '-i', 'video=USB Camera',
+          '-i', `video=${win32DeviceName || 'USB Camera'}`,
           '-video_size', `${w}x${h}`,
           '-frames:v', '1',
           '-y', dest,
@@ -132,9 +149,92 @@ class Camera {
     }
   }
 
+  /**
+   * On Windows, ask ffmpeg to list available dshow devices and return the
+   * friendly name of the first VIDEO device. Cached on the instance.
+   *
+   * Returns null on non-Windows, when probing is disabled (tests), or when
+   * the probe fails (we fall through to the hardcoded "USB Camera" default).
+   *
+   * ffmpeg's stderr output for `ffmpeg -list_devices true -f dshow -i dummy`
+   * looks like:
+   *
+   *   [dshow @ 0x...] DirectShow video devices
+   *   [dshow @ 0x...]  "HD Webcam"
+   *   [dshow @ 0x...]  "USB2.0 HD UVC WebCam"
+   *   [dshow @ 0x...] DirectShow audio devices
+   *   [dshow @ 0x...]  "Microphone (Realtek Audio)"
+   *
+   * We grab every quoted string that appears AFTER "DirectShow video devices"
+   * and BEFORE "DirectShow audio devices" (or end of output).
+   */
+  _resolveDshowDevice() {
+    if (os.platform() !== 'win32') return null;
+    if (!this._probeDshowDevices) return null;
+    if (this._dshowDevice !== null) return this._dshowDevice; // cached (even if empty string)
+
+    this._dshowDevice = ''; // sentinel: we tried
+
+    const tryCmds = [];
+    if (bundledFfmpeg && fs.existsSync(bundledFfmpeg)) tryCmds.push(bundledFfmpeg);
+    tryCmds.push('ffmpeg.exe');
+
+    for (const cmd of tryCmds) {
+      let bin = cmd;
+      let args;
+      if (cmd === 'ffmpeg.exe') {
+        args = ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'];
+      } else {
+        // Bundled ffmpeg on Windows is ffmpeg.exe with the same args
+        args = ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'];
+      }
+      let r;
+      try {
+        r = spawnSync(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (_) {
+        continue;
+      }
+      if (r.error) continue;
+      const out = (r.stderr || '') + (r.stdout || '');
+      const device = this._parseDshowListDevices(out);
+      if (device) {
+        this._dshowDevice = device;
+        return device;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Parse ffmpeg's `-list_devices` stderr output. Returns the first video
+   * device name, or null if none found. Pure function — exposed for tests.
+   */
+  _parseDshowListDevices(output) {
+    // ffmpeg prints the video list block before the audio list block.
+    // We split on the markers (when present) and only look at the video half.
+    const VIDEO_START = 'DirectShow video devices';
+    const VIDEO_END = 'DirectShow audio devices';
+    const vi = output.indexOf(VIDEO_START);
+    if (vi < 0) return null;
+    let block = output.slice(vi + VIDEO_START.length);
+    const ai = block.indexOf(VIDEO_END);
+    if (ai >= 0) block = block.slice(0, ai);
+    // Lines look like:  [dshow @ 0x...]  "Device Name"
+    // Match the FIRST quoted string in the video block.
+    const m = block.match(/^[^"]*"\s*([^"]+?)\s*"/m) || block.match(/"\s*([^"]+?)\s*"/);
+    if (!m) return null;
+    return m[1].trim();
+  }
+
   ffmpegCapture() {
+    // On Windows, resolve the dshow device name (probes once, then cached).
+    let win32DeviceName;
+    if (os.platform() === 'win32') {
+      win32DeviceName = this._resolveDshowDevice() || 'USB Camera';
+    }
+
     const dest = path.join(this.outputDir, `frame-${Date.now()}.jpg`);
-    const args = this.ffmpegArgs(dest);
+    const args = this.ffmpegArgs(dest, win32DeviceName);
     const tryOrder = [];
     if (bundledFfmpeg && fs.existsSync(bundledFfmpeg)) tryOrder.push(bundledFfmpeg);
     // System ffmpeg last — PATH lookup. We don't know if it exists until spawn.

@@ -88,6 +88,52 @@ test('camera: all candidates fail → reject with actionable error', async () =>
   }
 });
 
+test('camera: _parseDshowListDevices returns the first video device', () => {
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  // Realistic ffmpeg -list_devices stderr (Windows)
+  const sample = [
+    'ffmpeg version 6.1.1 Copyright (c) 2000-2026 the FFmpeg developers',
+    '[dshow @ 0x55ab] DirectShow video devices',
+    '[dshow @ 0x55ab]  "HD Webcam"',
+    '[dshow @ 0x55ab]  "USB2.0 HD UVC WebCam"',
+    '[dshow @ 0x55ab] DirectShow audio devices',
+    '[dshow @ 0x55ab]  "Microphone (Realtek Audio)"',
+    'Something went wrong with device string',
+  ].join('\n');
+  const got = c._parseDshowListDevices(sample);
+  assert.strictEqual(got, 'HD Webcam', 'should pick the first video device, not the audio mic');
+  c.stop();
+});
+
+test('camera: _parseDshowListDevices handles single-device list', () => {
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = [
+    'DirectShow video devices',
+    '[dshow]  "Integrated Camera"',
+  ].join('\n');
+  assert.strictEqual(c._parseDshowListDevices(sample), 'Integrated Camera');
+  c.stop();
+});
+
+test('camera: _parseDshowListDevices returns null on no markers', () => {
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = 'random stderr with no dshow list at all';
+  assert.strictEqual(c._parseDshowListDevices(sample), null);
+  c.stop();
+});
+
+test('camera: _resolveDshowDevice is a no-op on non-Windows', () => {
+  const { Camera } = require('../src/camera');
+  const c = new Camera({ _probeDshowDevices: true });
+  // On Linux, must return null immediately without spawning anything.
+  const got = c._resolveDshowDevice();
+  assert.strictEqual(got, null);
+  c.stop();
+});
+
 test('camera: bundled ffmpeg missing the binary path → fall through', async () => {
   const ffmpegStaticPath = require.resolve('ffmpeg-static');
   const orig = require.cache[ffmpegStaticPath];

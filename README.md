@@ -23,6 +23,10 @@ npm install -g face-lock
 
 > No native build step. `face-lock` uses [`@napi-rs/canvas`](https://www.npmjs.com/package/@napi-rs/canvas) (Skia-backed, NAPI), which ships prebuilt binaries for Windows / macOS / Linux on Node 18, 20, 22, and 24.
 
+> **First install:** the postinstall script auto-launches the `face-lock setup` wizard so you don't have to remember to run it. **Upgrades / re-installs:** if `~/.face-lock/profile.json` already exists, the wizard is skipped (and a `Run \`facecheck\` to reconfigure` hint is printed). This is what fixes the 0.1.4 "install hangs forever on Windows" issue.
+>
+> **CI / Docker:** the postinstall can't tell whether it's running on a TTY, so the wizard will still try to launch on a fresh install. Pass `npm install -g face-lock --ignore-scripts` to skip the wizard in scripted installs, then run `facecheck` from an interactive shell when you're ready.
+
 ### Upgrading from a previous version
 
 `npm i face-lock` does NOT auto-upgrade an existing global install — npm considers the version "satisfied" and returns. To upgrade:

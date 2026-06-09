@@ -5,6 +5,15 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-09
+
+### Fixed
+- **Install hung on `npm i -g face-lock` for existing users.** The postinstall script auto-launched the setup wizard unconditionally, which blocks the install on the wizard's first prompt. The wizard can't read keystrokes through the npm → node → inquirer chain on Windows, so the install wedged forever (users reported having to pass `--ignore-scripts` to work around it). The postinstall now checks for an existing `~/.face-lock/profile.json` and skips the wizard if found — fresh installs still get the wizard, upgrades and re-installs don't. The CI/Docker hang on fresh installs is documented in the README; pass `--ignore-scripts` if you're scripting the install.
+- **Camera couldn't find the webcam on Windows with `could not capture from camera. Tried: ffmpeg.exe.`** The Windows dshow invocation hardcoded `video=USB Camera` as the device name, but real Windows webcams are almost never named that — they're `HD Webcam`, `Integrated Camera`, `USB2.0 HD UVC WebCam`, etc. ffmpeg ran with a wrong device name, produced 0-byte output, and the fallback chain exhausted. The camera now probes `ffmpeg -list_devices true -f dshow -i dummy` on first capture (Windows only, cached on the instance) and uses the first video device it finds. If the probe fails, falls back to the `USB Camera` default. If the user passes `index` explicitly, that device is used directly (no probe).
+
+### Added
+- 4 new unit tests for the dshow device-name parser (`_parseDshowListDevices`) and the platform guard (`_resolveDshowDevice` is a no-op on non-Windows).
+
 ## [0.1.4] - 2026-06-08
 
 ### Fixed
