@@ -5,27 +5,46 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0-alpha.6] - 2026-06-09
+> **⚠️ alpha.6 is broken on Windows.** It attempted the fix described below
+> (populate `global.Canvas` / `global.Image` from `@napi-rs/canvas`), but
+> that fix DOES NOT WORK. The real fix is in **alpha.7** (and alpha.6
+> should be considered deprecated — run `npm deprecate face-lock@0.2.0-alpha.6`
+> if you maintain a mirror).
+>
+> **Retest instruction:** use `npm install -g face-lock@next` to get
+> alpha.7, not alpha.6.
+
+## [0.2.0-alpha.7] - 2026-06-09
 
 ### Fixed
-- **face-api.js now accepts our Canvas/Image inputs.** The previous release (alpha.5) fixed the camera capture path on Windows, but the next call (`face-api.js`'s `detectSingleFace`) threw `toNetInput - expected media to be of type HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | tf.Tensor3D, or to be an element id` even though we were passing an `@napi-rs/canvas` `CanvasElement` (which is the right DOM-like class).
-  - **Root cause:** face-api.js's Node env (`createNodejsEnv.js`) initialises its `instanceof` checks by reading `global.Canvas` / `global.Image` / `global.HTMLCanvasElement`. `@napi-rs/canvas` does **not** register itself on `global` — you have to `require('@napi-rs/canvas')` and use the exported classes. So `isMediaElement()` always returned `false` for our inputs, and the catch-all throw fired.
-  - **Fix:** new `registerCanvasGlobals()` in `src/detector.js` runs once on first `detectOne` / `detectAll` call, imports `@napi-rs/canvas`, and assigns `c.Canvas` / `c.Image` / `CanvasElement` to `global.Canvas` / `global.Image` / `global.HTMLCanvasElement`. face-api.js's `isMediaElement()` then returns `true` for our DOM-like inputs and `detectSingleFace` proceeds.
-  - Also added a `decodeInput()` dispatcher that accepts a JPEG file path, raw `Buffer`, or DOM-like object — it loads paths/buffers via `loadImage()` from `@napi-rs/canvas` and returns the resulting `Image`. DOM-like inputs (including the existing `loadImageAsCanvas` flow in `bin/face-lock.js`) pass through unchanged.
+- **face-api.js's env is now actually updated — alpha.6's approach didn't work.** The previous release (alpha.6) tried to fix the `toNetInput - expected media to be of type HTMLImageElement | ...` error by setting `global.Canvas` / `global.Image` from `@napi-rs/canvas`. **That fix was incorrect** and produced no behaviour change on Windows — face-api.js still threw the same error.
+  - **Why alpha.6 failed:** `face-api.js`'s Node env (`createNodejsEnv.js`) reads `global.Canvas` / `global.Image` and uses those classes for `instanceof` checks in `isMediaElement()`. **Critically, the env is created ONCE at face-api.js module load time** — `env/index.js` calls `initialize()` as the last line of the file. By the time our `registerCanvasGlobals()` runs and writes to `global.Canvas`, the env has already captured `undefined` and synthesised empty placeholder classes. Setting `global.Canvas` later is too late — the env's `Canvas` and `Image` properties are frozen in.
+  - **The real fix:** face-api.js exports an `env.monkeyPatch({ Canvas, Image, createCanvasElement, createImageElement })` function that **mutates the existing env in place**. We call it from `registerCanvasGlobals(faceApi)` right after `loadModels()` (which is where the face-api.js require happens). The env's `Canvas` and `Image` are now our actual `@napi-rs/canvas` classes, and `isMediaElement()` returns `true` for our inputs.
+  - `detectOne()` and `detectAll()` now both call `registerCanvasGlobals(faceApi)` after `loadModels()` and before the first `detectSingleFace` / `detectAllFaces` call.
+  - The global-write logic from alpha.6 is kept as a best-effort (some libraries that *do* read `global.Canvas` lazily, like older `canvas` polyfills, still work). But it's no longer the primary mechanism.
 
 ### Tests
-- 7 new tests for the `decodeInput` dispatcher and the `registerCanvasGlobals` registration:
-  - `@napi-rs/canvas` Image class is named `Image` (the dispatch table depends on this)
-  - `@napi-rs/canvas` Canvas is named `CanvasElement` (not `Canvas` — the public class is the factory)
-  - Plain `Buffer` / `string` / `null` / `undefined` / `{}` are correctly classified as **not** DOM-like
-  - `loadImage()` actually decodes a real JPEG (skippable via `FACE_LOCK_SKIP_CANVAS_LOAD=1` on platforms where the napi binding's bundled libjpeg crashes — not a real issue on Windows prebuilds)
-  - After `detectOne` is called, `global.Canvas` / `global.Image` / `global.HTMLCanvasElement` are populated and `loadImage` results are `instanceof global.Image` — proving face-api.js's `isMediaElement` check will pass.
-- Full suite: **76/76 pass, 1 skip** (was 70/70; +6 from new tests, +1 from the SIGSEGV-on-Linux-only JPEG decode check).
+- New: `detectOne: face-api.js env is monkey-patched with @napi-rs/canvas classes`. Loads the real `face-api.js` module (cheap — 380ms on Linux), calls `detector.detectOne()`, and asserts `faceApi.env.getEnv().Image === c.Image` and `faceApi.env.getEnv().Canvas === c.Canvas`. This test **fails** on the alpha.6 code and **passes** on alpha.7 — that's what proved the regression.
+- The `isMediaElement` check that face-api.js actually runs (`input instanceof env.Image || input instanceof env.Canvas || input instanceof env.Video`) is reproduced inline in the test, using `c.createCanvas(1, 1)` (which doesn't require JPEG decode, so it works on every platform — even Linux where `@napi-rs/canvas`'s bundled libjpeg is broken).
+- Full suite: **77/77 pass, 1 skip** (was 76/76; +1 from the new monkey-patch test).
 
 ### Notes
-- **Why this is alpha.6 and not just merged into alpha.5:** alpha.5 was the camera fix, alpha.6 is the detector fix. The pattern of one-issue-per-alpha makes it easy to roll back the right change if Windows retesting surfaces a new issue.
-- **No new native deps.** We already had `@napi-rs/canvas` in `package.json` (it's a prebuilt napi binary — no `node-gyp` step on any platform). The fix just wires it into face-api.js's env via `global`.
-- **No code-path changes for users whose init succeeded before.** Only the first call to `detectOne` / `detectAll` after `loadModels` triggers `registerCanvasGlobals`, and it's idempotent (guarded by `_canvasRegistered`).
+- **Why alpha.7 and not just a `0.2.0-alpha.6-1` patch:** npm dist-tags can't easily point to a new commit on the same version, and the user-facing message "alpha.6 was broken, use alpha.7 instead" is clearer with a distinct version. If you installed alpha.6, please update: `npm install -g face-lock@next`.
+- **No new native deps.** We already had `@napi-rs/canvas` in `package.json` (it's a prebuilt napi binary — no `node-gyp` step on any platform). The fix is purely a 3-line `env.monkeyPatch` call.
+- **Why the env is captured at load time:** face-api.js loads TF.js's `tfjs-converter` and `tfjs-core` modules, both of which call `isMediaElement` early. If the env wasn't frozen at module load, the order of `require()` calls across the whole app would affect whether `isMediaElement` works — a recipe for race conditions. Freezing the env at load time is correct design; the fix is to use the provided `monkeyPatch` migration path.
+
+## [0.2.0-alpha.6] - 2026-06-09
+
+### ⚠️ Broken — use alpha.7 instead
+The fix described below **did not work** on Windows. face-api.js still
+throws `toNetInput - expected media to be of type ...` because the
+env captures `global.Canvas` / `global.Image` at **module load time**,
+not lazily. See alpha.7 for the real fix.
+
+### What it tried to fix
+- `face-api.js` threw `toNetInput - expected media to be of type HTMLImageElement | ...` even though we were passing an `@napi-rs/canvas` `CanvasElement` (which is the right DOM-like class).
+- alpha.6's attempted fix: `registerCanvasGlobals()` imported `@napi-rs/canvas` and assigned its classes to `global.Canvas` / `global.Image` / `global.HTMLCanvasElement`. **This is necessary but not sufficient** — the env is already frozen by then.
+- alpha.6 added the `decodeInput()` dispatcher (path / Buffer / DOM element) — that part is correct and is retained in alpha.7.
 
 ## [0.2.0-alpha.5] - 2026-06-09
 

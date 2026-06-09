@@ -106,44 +106,75 @@ async function getDetector(opts = {}) {
 }
 
 /**
- * Decode a JPEG file (path or Buffer) into something face-api.js can
- * accept: an HTMLImageElement-compatible object. face-api.js's
- * internal toNetInput() throws if the input is "a file path or
- * raw buffer" — it wants a DOM element or a tf.Tensor3D.
+ * Wire @napi-rs/canvas into face-api.js's env.
  *
- * face-api.js's Node env (createNodejsEnv.js) checks
- * `global.Canvas` and `global.Image` to figure out what classes
- * to `instanceof`-check against in isMediaElement(). @napi-rs/canvas
- * does NOT register itself on global — you have to import it. So we
- * import the classes here and assign them to `global` on first use;
- * face-api.js's isMediaElement() will then return true for our
- * Image/CanvasElement instances.
+ * Why this exists:
+ *   - face-api.js's Node env (createNodejsEnv.js) initialises its
+ *     `instanceof` checks (isMediaElement, etc.) from
+ *     `global.Canvas` / `global.Image` — and the env is created
+ *     ONCE at face-api.js module load time (env/index.js calls
+ *     initialize() as the last line). If `global.Canvas` is empty
+ *     at that moment, the env's Canvas/Image classes are
+ *     placeholder empty classes, and isMediaElement() always
+ *     returns false → toNetInput throws.
+ *   - @napi-rs/canvas does NOT register its classes on global.
+ *     You must `require('@napi-rs/canvas')` and use the exports.
+ *   - The fix: call face-api.js's exported `env.monkeyPatch({...})`
+ *     AFTER requiring face-api.js, but BEFORE the first detector
+ *     call. monkeyPatch mutates the existing env in place.
  *
- * Accepts:
- *   - string (file path)
- *   - Buffer (raw JPEG bytes)
- *   - HTMLImageElement-compatible object (passed through, no-op)
+ * Idempotent (guarded by _canvasRegistered). Cheap to call many
+ * times — the require() is cached, monkeyPatch is a no-op on second
+ * call.
+ *
+ * @param {object} faceApi - the result of require('face-api.js')
  */
 let _canvasRegistered = false;
-function registerCanvasGlobals() {
+let _napiCanvas = null;
+function getNapiCanvas() {
+  if (!_napiCanvas) {
+    // eslint-disable-next-line global-require
+    _napiCanvas = require('@napi-rs/canvas');
+  }
+  return _napiCanvas;
+}
+function registerCanvasGlobals(faceApi) {
   if (_canvasRegistered) return;
-  // eslint-disable-next-line global-require
-  const c = require('@napi-rs/canvas');
-  // face-api.js createNodejsEnv.js looks at global.Canvas / global.Image
+  const c = getNapiCanvas();
+
+  // Best-effort: also set on global in case any other library reads
+  // it (matches what `canvas` (node-canvas) does historically).
   if (!global.Canvas && c.Canvas) global.Canvas = c.Canvas;
   if (!global.Image && c.Image) global.Image = c.Image;
-  // Also expose the concrete class returned by createCanvas, since
-  // @napi-rs/canvas wraps it: the public Canvas is the factory, but
-  // createCanvas() returns a CanvasElement (different class).
   if (!global.HTMLCanvasElement) {
     const probe = c.createCanvas(1, 1);
     global.HTMLCanvasElement = probe.constructor;
   }
+
+  // The real fix: monkey-patch face-api.js's env so isMediaElement()
+  // uses our actual @napi-rs/canvas classes.
+  if (faceApi && faceApi.env && typeof faceApi.env.monkeyPatch === 'function') {
+    try {
+      faceApi.env.monkeyPatch({
+        Canvas: c.Canvas,
+        Image: c.Image,
+        createCanvasElement: () => c.createCanvas(1, 1),
+        createImageElement: () => new c.Image(),
+      });
+    } catch (e) {
+      // monkeyPatch can throw if env not yet initialised (e.g. ESM
+      // bundle). Fall back to setting global in hope that a later
+      // env re-init picks it up.
+      // eslint-disable-next-line no-console
+      console.warn('[face-lock] env.monkeyPatch failed:', e && e.message);
+    }
+  }
+
   _canvasRegistered = true;
 }
 
-async function decodeInput(input) {
-  registerCanvasGlobals();
+async function decodeInput(input, faceApi) {
+  if (faceApi) registerCanvasGlobals(faceApi);
 
   // Already a DOM-like element (e.g. tf.Tensor3D, HTMLCanvasElement)?
   if (input && typeof input === 'object' && !(Buffer.isBuffer(input)) &&
@@ -187,7 +218,15 @@ async function decodeInput(input) {
  */
 async function detectOne(input) {
   const faceApi = await loadModels();
-  const decoded = await decodeInput(input);
+  // CRITICAL: monkey-patch face-api.js's env with our @napi-rs/canvas
+  // classes BEFORE the first detectSingleFace call. The env is created
+  // at face-api.js module load time (env/index.js: initialize() is the
+  // last line) with empty placeholder Canvas/Image classes, and
+  // isMediaElement() does `input instanceof env.Image` against those
+  // placeholders. monkeyPatch updates the existing env in place so the
+  // instanceof checks use our real classes.
+  registerCanvasGlobals(faceApi);
+  const decoded = await decodeInput(input, faceApi);
   const detection = await faceApi.detectSingleFace(decoded).withFaceLandmarks().withFaceDescriptor();
   if (!detection) return null;
   return {
@@ -211,7 +250,9 @@ async function detectOne(input) {
  */
 async function detectAll(input) {
   const faceApi = await loadModels();
-  const decoded = await decodeInput(input);
+  // See note in detectOne — monkey-patch the env first.
+  registerCanvasGlobals(faceApi);
+  const decoded = await decodeInput(input, faceApi);
   const results = await faceApi
     .detectAllFaces(decoded)
     .withFaceLandmarks()

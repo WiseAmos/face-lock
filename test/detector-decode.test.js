@@ -111,9 +111,10 @@ test('detectOne: registerCanvasGlobals makes @napi-rs/canvas visible to face-api
   // isMediaElement() always returned false, triggering the
   // "expected media to be of type HTMLImageElement ..." throw.
   //
-  // Our registerCanvasGlobals() must populate global.Canvas and
-  // global.Image from @napi-rs/canvas BEFORE face-api.js's env is
-  // accessed, so isMediaElement() correctly recognises our inputs.
+  // Our registerCanvasGlobals() must monkey-patch face-api.js's env
+  // with our @napi-rs/canvas classes BEFORE face-api.js's env is
+  // used in instanceof checks, so isMediaElement() correctly
+  // recognises our inputs.
   //
   // We snapshot + restore global state to keep the test hermetic.
   const savedCanvas = global.Canvas;
@@ -175,4 +176,70 @@ test('detectOne: registerCanvasGlobals makes @napi-rs/canvas visible to face-api
     if (savedImage === undefined) delete global.Image; else global.Image = savedImage;
     if (savedHTMLCanvasElement === undefined) delete global.HTMLCanvasElement; else global.HTMLCanvasElement = savedHTMLCanvasElement;
   }
+});
+
+/**
+ * The CRITICAL test for the alpha.7 fix.
+ *
+ * The bug: face-api.js's env is initialised at module load time
+ * (env/index.js: `initialize()` is the last line) with empty
+ * placeholder Canvas/Image classes. Setting global.Canvas later is
+ * too late — the env has already captured `undefined`.
+ *
+ * The fix: registerCanvasGlobals() must call face-api.js's
+ * `env.monkeyPatch({ Canvas, Image, createCanvasElement, createImageElement })`
+ * to update the env in place.
+ *
+ * This test loads the REAL face-api.js module (cheap — 380ms on Linux)
+ * and asserts that the alpha.7 detector code actually mutates the
+ * face-api.js env in place. (If you revert detector.js to the
+ * alpha.6 logic that only set global.Canvas/Image, this test
+ * fails.)
+ */
+test('detectOne: face-api.js env is monkey-patched with @napi-rs/canvas classes', async () => {
+  // eslint-disable-next-line global-require
+  const faceApi = require('face-api.js');
+  const c = require('@napi-rs/canvas');
+
+  // Force a fresh detector module so the internal _canvasRegistered
+  // flag is false — we want the monkey-patch to actually fire, not
+  // short-circuit on "already registered" from a prior test.
+  // (Node test runner runs each test file in its own process, so the
+  // intra-file tests above are in a different process from this one.
+  // But the FIRST test in this file already called detectOne and
+  // monkey-patched, so we re-trigger by deleting the cached module.)
+  const detectorPath = require.resolve('../src/detector');
+  delete require.cache[detectorPath];
+  // eslint-disable-next-line global-require
+  const detector = require('../src/detector');
+
+  // Trigger registerCanvasGlobals via detectOne (it calls
+  // loadModels → registerCanvasGlobals(faceApi) → env.monkeyPatch).
+  // We pass a non-existent path so the ENOENT from readFileSync
+  // exits before the (unmockable) face-api.js model inference runs.
+  await assert.rejects(
+    () => detector.detectOne('/nonexistent/path-for-monkeypatch-test.jpg'),
+    /ENOENT|no such file|cannot find/i,
+  );
+
+  // The assertion: face-api.js's env now uses our classes.
+  const envAfter = faceApi.env.getEnv();
+  assert.strictEqual(envAfter.Image, c.Image,
+    'AFTER detectOne: env.Image must be the @napi-rs/canvas Image class');
+  assert.strictEqual(envAfter.Canvas, c.Canvas,
+    'AFTER detectOne: env.Canvas must be the @napi-rs/canvas Canvas class');
+
+  // The actual instanceof check face-api.js's isMediaElement does.
+  // We use createCanvas (no JPEG decode) so this works on every
+  // platform — the SIGSEGV-on-Linux bug only affects loadImage.
+  const cv = c.createCanvas(1, 1);
+  assert.ok(cv instanceof envAfter.Canvas,
+    'createCanvas() result must be instanceof env.Canvas after monkey-patch');
+  // isMediaElement equivalent (the function that was throwing)
+  const isMedia = (input) => {
+    const e = faceApi.env.getEnv();
+    return input instanceof e.Image || input instanceof e.Canvas || input instanceof e.Video;
+  };
+  assert.strictEqual(isMedia(cv), true,
+    'isMediaElement(cv) must be true after monkey-patch (this is the exact check that was throwing)');
 });
