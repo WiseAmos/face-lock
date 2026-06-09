@@ -102,13 +102,17 @@ test('camera: all candidates fail → reject with actionable error', async () =>
       (err) => {
         assert.match(err.message, /could not capture from camera/);
         assert.match(err.message, /ffmpeg/);
-        // Error message includes platform-specific hints — verify *some*
-        // hint is present (we don't hardcode which one because the test
-        // platform varies).
+        // Error message now includes per-candidate diagnostic detail
+        // (e.g. "exited with code 1" + ffmpeg stderr). Verify *some*
+        // diagnostic is present.
         assert.ok(
-          /Windows:|macOS:|Linux:/.test(err.message),
-          'error should include at least one platform-specific hint'
+          /exited with code|binary not found|spawn failed/.test(err.message),
+          'error should include per-candidate diagnostic detail'
         );
+        // err.failures is exposed for programmatic access (tests,
+        // higher-level wrappers). Verify the shape.
+        assert.ok(Array.isArray(err.failures), 'err.failures should be an array');
+        assert.ok(err.failures.length > 0, 'err.failures should record at least one attempt');
         return true;
       }
     );

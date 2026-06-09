@@ -5,6 +5,17 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.4] - 2026-06-09
+
+### Fixed
+- **Camera capture errors now show what ffmpeg actually said.** Previously, when the bundled `ffmpeg.exe` ran but failed (dshow couldn't find the device, wrong device name, COM permission block, etc.), the final error message just listed the candidate paths and a generic "check your webcam" hint — making it impossible to tell whether the binary was missing, the device name was wrong, or the OS denied access. The error now attaches the last 8 lines of ffmpeg's stderr per candidate, differentiates `enoent` (binary missing) from `exit` (binary ran, failed) from `spawn-error`, and exposes `err.failures` programmatically.
+- New `FACE_LOCK_CAMERA_DEBUG=1` environment variable prints ffmpeg's full stderr live to the terminal as the capture is attempted — useful when the truncated error message in the final report isn't enough.
+- Windows-specific hint in the final error now points to the Camera permission setting in `Settings → Privacy & Security → Camera` (the most common cause on Win 10/11 since the 2020 privacy change).
+
+### Notes
+- No code-path changes for the **happy path** (camera works on first try). The fix only affects error reporting.
+- This is a diagnostic release — paired with the alpha.3 Windows E2E failure where bundled ffmpeg was reached but the underlying cause was hidden.
+
 ## [0.2.0-alpha.3] - 2026-06-09
 
 ### Added

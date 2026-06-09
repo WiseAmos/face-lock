@@ -404,34 +404,74 @@ class Camera {
     tryOrder.push(os.platform() === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
     if (os.platform() === 'darwin') tryOrder.push('imagesnap');
 
+    // Per-candidate failure log so the final error can show *what
+    // ffmpeg actually said*, not just "we tried these binaries".
+    // Each entry: { cmd, reason: 'enoent'|'exit'|'spawn-error',
+    //                code?: number, stderr?: string }
+    const failures = [];
+    const debug = !!process.env.FACE_LOCK_CAMERA_DEBUG;
+
     return new Promise((resolve, reject) => {
       const tryNext = (i) => {
         if (i >= tryOrder.length) {
+          // All candidates exhausted. Build a diagnostic error that
+          // shows what each one actually did — not just the path list.
+          // This is the single biggest UX bug in 0.2.0-alpha.3: when
+          // bundled ffmpeg ran but failed (dshow can't find device,
+          // permission denied, etc.), the user used to see a generic
+          // "check your webcam" hint with no idea which camera backend
+          // actually failed. Now they see the real ffmpeg stderr.
+          let detail = '';
+          for (const f of failures) {
+            const tag = `[${f.cmd}]`;
+            if (f.reason === 'enoent') {
+              detail += `\n  ${tag} binary not found (ENOENT)`;
+            } else if (f.reason === 'spawn-error') {
+              detail += `\n  ${tag} spawn failed: ${f.stderr || '(no stderr)'}`;
+            } else {
+              // exit with non-zero (or zero but no file)
+              const tail = (f.stderr || '').trim().split('\n').slice(-8).join('\n      ');
+              detail += `\n  ${tag} exited with code ${f.code}${tail ? '\n      ' + tail : ''}`;
+            }
+          }
           const err = new Error(
-            `could not capture from camera. Tried: ${tryOrder.join(', ')}.\n` +
-            `On Windows: check that a webcam is connected and not in use (close Zoom, Skype, Discord, etc.).\n` +
+            `could not capture from camera. Tried ${failures.length} candidate(s):${detail}\n` +
+            `On Windows: check that a webcam is connected and not in use (close Zoom, Skype, Discord, etc.), ` +
+            `and that your terminal app has Camera permission in Windows Settings → Privacy & Security → Camera.\n` +
             `On macOS:  the system may need camera permission for the terminal app. System Settings → Privacy & Security → Camera.\n` +
-            `On Linux:  verify /dev/video${this.index >= 0 ? this.index : 0} exists and is readable.`
+            `On Linux:  verify /dev/video${this.index >= 0 ? this.index : 0} exists and is readable.\n` +
+            `Run with FACE_LOCK_CAMERA_DEBUG=1 to see the full ffmpeg stderr for each candidate.`
           );
           err.code = 'CAMERA_NOT_AVAILABLE';
+          err.failures = failures; // programmatic access for tests
           return reject(err);
         }
         const cmd = tryOrder[i];
         this.lastTried = cmd;
         const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
         let stderr = '';
-        child.stderr.on('data', (b) => { stderr += b.toString(); });
+        child.stderr.on('data', (b) => {
+          const s = b.toString();
+          stderr += s;
+          if (debug) process.stderr.write(`[${cmd}] ${s}`);
+        });
         child.on('error', (err) => {
-          if (err.code === 'ENOENT') { tryNext(i + 1); return; }
+          if (err.code === 'ENOENT') {
+            failures.push({ cmd, reason: 'enoent' });
+            return tryNext(i + 1);
+          }
           // Real error from the binary — don't fall through
+          failures.push({ cmd, reason: 'spawn-error', stderr: err.message + (stderr ? '\n' + stderr : '') });
           reject(new Error(`camera cmd failed (${cmd}): ${err.message}\nstderr:\n${stderr.slice(0, 500)}`));
         });
         child.on('exit', (code) => {
           if (code === 0 && fs.existsSync(dest) && fs.statSync(dest).size > 0) {
             return resolve(dest);
           }
-          // ffmpeg ran but produced nothing — usually wrong device
-          // name. Try the next candidate (system ffmpeg or imagesnap).
+          // ffmpeg ran but produced nothing — record the failure
+          // with the actual stderr so the final error can show it.
+          // Then try the next candidate (system ffmpeg or imagesnap).
+          failures.push({ cmd, reason: 'exit', code, stderr });
           tryNext(i + 1);
         });
       };
