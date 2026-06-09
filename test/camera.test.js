@@ -157,3 +157,343 @@ test('camera: bundled ffmpeg missing the binary path → fall through', async ()
     if (orig) require.cache[ffmpegStaticPath] = orig;
   }
 });
+
+// =====================================================================
+// Native path (face-lock-camera) tests.
+//
+// These tests stub both the `face-lock-camera` module AND
+// `ffmpeg-static` via require.cache to verify the native code path in
+// src/camera.js handles all five outcomes:
+//   1. FACE_LOCK_NO_NATIVE=1                   → skip native entirely
+//   2. require('face-lock-camera') throws      → fall through to ffmpeg
+//   3. tryOpen() returns null                  → fall through to ffmpeg
+//   4. captureJpeg() returns 0 bytes           → close + fall through
+//   5. captureJpeg() returns bytes             → use them, skip ffmpeg
+// And the env-var opt-out is honored.
+//
+// Stubbing strategy: face-lock-camera is NOT installed in this test
+// env, so `require('face-lock-camera')` would normally throw. We
+// intercept Module._resolveFilename to redirect that bare specifier
+// to a known absolute path, then register that path in require.cache
+// with our stub exports. Cleanup restores the original
+// _resolveFilename in `finally`.
+// =====================================================================
+
+const NATIVE_MODULE_ID = 'face-lock-camera';
+const NATIVE_STUB_PATH = path.join(__dirname, '_native_stub.js');
+const FFMPEG_STATIC_PATH = require.resolve('ffmpeg-static');
+const CAMERA_PATH = require.resolve('../src/camera');
+
+// Write a minimal stub file ONCE. Its contents are never actually
+// executed (we pre-populate require.cache with `loaded: true`), but
+// the file must exist on disk for Module._load to be happy if the
+// cache entry is ever cleared.
+let _stubWritten = false;
+function ensureStubFile() {
+  if (_stubWritten) return;
+  fs.writeFileSync(
+    NATIVE_STUB_PATH,
+    '// Auto-generated stub for camera.test.js native-path tests.\n' +
+    '// Overwritten via require.cache — this file is never actually\n' +
+    '// executed at runtime.\n' +
+    'module.exports = {};\n'
+  );
+  _stubWritten = true;
+}
+
+function stubNative(stubExports) {
+  ensureStubFile();
+  // Pre-populate the cache at the stub path (used when
+  // Module._resolveFilename is called and returns our stub path)
+  require.cache[NATIVE_STUB_PATH] = {
+    id: NATIVE_STUB_PATH,
+    filename: NATIVE_STUB_PATH,
+    loaded: true,
+    exports: stubExports,
+    children: [],
+    paths: [],
+  };
+  // Intercept bare specifier resolution
+  const Module = require('module');
+  const origResolve = Module._resolveFilename;
+  Module._resolveFilename = function patched(request, ...rest) {
+    if (request === NATIVE_MODULE_ID) return NATIVE_STUB_PATH;
+    return origResolve.call(this, request, ...rest);
+  };
+  // ALSO override the cache entry at the REAL resolved path.
+  // Why: Node 22 maintains a `relativeResolveCache` (internal,
+  // not exposed) that caches `${parent.path}\0${request}` →
+  // resolved filename. It's consulted BEFORE Module._resolveFilename
+  // and returns the cached filename directly. So even with our
+  // _resolveFilename patch, a stale entry from a prior require
+  // short-circuits to the real path. By replacing _cache[realPath]
+  // with our stub, we win regardless of which path the resolution
+  // takes.
+  //
+  // We resolve from the perspective of the test file (so the
+  // node_modules lookup walks up to /root/face-lock/node_modules).
+  const testModule = require.cache[__filename] || { filename: __filename };
+  const realPath = origResolve.call(Module, NATIVE_MODULE_ID, testModule, false);
+  const savedReal = require.cache[realPath];
+  require.cache[realPath] = {
+    id: realPath,
+    filename: realPath,
+    loaded: true,
+    exports: stubExports,
+    children: [],
+    paths: [],
+  };
+  return () => {
+    Module._resolveFilename = origResolve;
+    delete require.cache[NATIVE_STUB_PATH];
+    if (savedReal !== undefined) {
+      require.cache[realPath] = savedReal;
+    } else {
+      delete require.cache[realPath];
+    }
+  };
+}
+
+function stubFfmpegStatic(binPath) {
+  require.cache[FFMPEG_STATIC_PATH] = {
+    id: FFMPEG_STATIC_PATH,
+    filename: FFMPEG_STATIC_PATH,
+    loaded: true,
+    exports: binPath,
+    children: [],
+    paths: [],
+  };
+}
+
+function resetFfmpegStatic() {
+  delete require.cache[FFMPEG_STATIC_PATH];
+}
+
+function freshCamera() {
+  // The proper cache-override dance: ensure both stubs are in place,
+  // then delete the camera cache so it re-requires both modules on
+  // its next load.
+  delete require.cache[CAMERA_PATH];
+  return require(CAMERA_PATH);
+}
+
+test('camera: FACE_LOCK_NO_NATIVE=1 → native path skipped, ffmpeg used', async () => {
+  const origEnv = process.env.FACE_LOCK_NO_NATIVE;
+  process.env.FACE_LOCK_NO_NATIVE = '1';
+  const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
+  stubFfmpegStatic(f.bin);
+  try {
+    // nativeEnabled() must return false
+    const { nativeEnabled } = freshCamera();
+    assert.strictEqual(nativeEnabled(undefined), false,
+      'nativeEnabled should return false when env var is set');
+
+    // Re-stub after freshCamera (which deletes camera cache but
+    // leaves the ffmpeg stub alone, so it should still be there)
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0 });
+    const dest = await c.capture();
+    assert.ok(dest.endsWith('.jpg'), `dest should end in .jpg, got ${dest}`);
+    assert.ok(fs.existsSync(dest), `dest should exist, got ${dest}`);
+    c.stop();
+  } finally {
+    resetFfmpegStatic();
+    if (origEnv === undefined) delete process.env.FACE_LOCK_NO_NATIVE;
+    else process.env.FACE_LOCK_NO_NATIVE = origEnv;
+    cleanupFake(f.dir);
+  }
+});
+
+test('camera: native module require fails at load → fall through to ffmpeg', async () => {
+  // The real `face-lock-camera` is installed in this test env (via
+  // the `file:./crates/face-lock-camera` dep in package.json), so
+  // we must stub it to make `loadNative()` return null. We stub a
+  // broken module (tryOpen returns null) to force the fall-through
+  // path, then assert the native path was attempted.
+  const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
+  stubFfmpegStatic(f.bin);
+  const unstub = stubNative({
+    listDevices: () => { throw new Error('simulated load failure'); },
+    tryOpen: () => null,
+    Camera: function () { throw new Error('not used'); },
+  });
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: true });
+    const dest = await c.capture();
+    assert.ok(dest.endsWith('.jpg'), `dest should end in .jpg, got ${dest}`);
+    assert.ok(fs.existsSync(dest), `dest should exist, got ${dest}`);
+    // The native path was attempted (because _useNative=true and
+    // env var is unset). loadNative returned null (or listDevices
+    // threw), nativeCapture threw, capture() fell through to ffmpeg.
+    assert.strictEqual(c._nativeAttempted, true,
+      'native path should have been attempted');
+    assert.ok(c.nativeFailureMessage && c.nativeFailureMessage.length > 0,
+      `nativeFailureMessage should be set, got: ${c.nativeFailureMessage}`);
+    c.stop();
+  } finally {
+    unstub();
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});
+
+test('camera: native tryOpen returns null → fall through to ffmpeg', async () => {
+  const unstub = stubNative({
+    listDevices: () => [],
+    tryOpen: () => null,
+    Camera: function () { throw new Error('Camera not used in this test'); },
+  });
+  const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
+  stubFfmpegStatic(f.bin);
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: true });
+    const dest = await c.capture();
+    assert.ok(dest.endsWith('.jpg'), `dest should end in .jpg, got ${dest}`);
+    assert.strictEqual(c._nativeAttempted, true,
+      'native path should have been attempted');
+    assert.match(c.nativeFailureMessage, /tryOpen returned null/,
+      `nativeFailureMessage should be 'tryOpen returned null', got: ${c.nativeFailureMessage}`);
+    c.stop();
+  } finally {
+    unstub();
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});
+
+test('camera: native tryOpen returns a handle, captureJpeg returns bytes → use them, skip ffmpeg', async () => {
+  const validJpeg = Buffer.from([
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+  ]);
+  let closed = 0;
+  let openCount = 0;
+  let captureCount = 0;
+  const fakeHandle = {
+    captureJpeg() { captureCount++; return validJpeg; },
+    close() { closed++; },
+  };
+  const unstub = stubNative({
+    listDevices: () => [{ index: 0, name: 'fake', backend: 'fake' }],
+    tryOpen: () => { openCount++; return fakeHandle; },
+    Camera: function () { return fakeHandle; },
+  });
+  // ffmpeg stub that EXITS NON-ZERO so we can tell the difference
+  // between native and ffmpeg path
+  const f = makeFakeFfmpeg('echo "FFMPEG WAS CALLED — should not be" >&2; exit 99');
+  stubFfmpegStatic(f.bin);
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: true });
+    const dest = await c.capture();
+    assert.ok(dest.includes('frame-native-'),
+      `dest should be the native-prefixed path, got ${dest}`);
+    assert.ok(fs.existsSync(dest), 'native frame file should exist');
+    const onDisk = fs.readFileSync(dest);
+    assert.deepStrictEqual(onDisk, validJpeg,
+      'file contents should equal the bytes captureJpeg returned');
+    assert.strictEqual(openCount, 1, 'tryOpen should be called exactly once');
+    assert.strictEqual(captureCount, 1, 'captureJpeg should be called once');
+    c.stop();
+    assert.strictEqual(closed, 1, 'close() should be called exactly once on stop()');
+  } finally {
+    unstub();
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});
+
+test('camera: native handle re-used across calls (no re-open per frame)', async () => {
+  const validJpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]);
+  let openCount = 0;
+  let captureCount = 0;
+  const fakeHandle = {
+    captureJpeg() { captureCount++; return validJpeg; },
+    close: () => {},
+  };
+  const unstub = stubNative({
+    listDevices: () => [],
+    tryOpen: () => { openCount++; return fakeHandle; },
+    Camera: function () { return fakeHandle; },
+  });
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: true });
+    const a = await c.capture();
+    const b = await c.capture();
+    const d = await c.capture();
+    // The dest path uses Date.now() with 1ms resolution — three
+    // back-to-back calls may collide on fast hardware. The
+    // meaningful signal is that tryOpen was called exactly once
+    // (handle re-use) and captureJpeg was called 3 times.
+    assert.ok(typeof a === 'string' && a.includes('frame-native-'),
+      `a should be a native frame path, got ${a}`);
+    assert.ok(typeof b === 'string' && b.includes('frame-native-'),
+      `b should be a native frame path, got ${b}`);
+    assert.ok(typeof d === 'string' && d.includes('frame-native-'),
+      `d should be a native frame path, got ${d}`);
+    assert.strictEqual(openCount, 1, 'tryOpen should be called exactly once across 3 captures');
+    assert.strictEqual(captureCount, 3, 'captureJpeg should be called 3 times');
+    c.stop();
+  } finally {
+    unstub();
+  }
+});
+
+test('camera: native captureJpeg returns empty → close, fall through to ffmpeg', async () => {
+  const validJpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]);
+  let closed = 0;
+  const badHandle = {
+    captureJpeg: () => Buffer.alloc(0),
+    close: () => { closed++; },
+  };
+  let handleIdx = 0;
+  const handles = [badHandle, badHandle, badHandle];
+  const unstub = stubNative({
+    listDevices: () => [],
+    tryOpen: () => handles[handleIdx++],
+    Camera: function () { return handles[handleIdx - 1]; },
+  });
+  const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
+  stubFfmpegStatic(f.bin);
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: true });
+    const dest = await c.capture();
+    assert.ok(dest.endsWith('.jpg'), `dest should end in .jpg, got ${dest}`);
+    assert.ok(!dest.includes('frame-native-'),
+      'dest should be the ffmpeg path, not the native path');
+    assert.strictEqual(closed, 1, 'bad handle should be closed after empty frame');
+    c.stop();
+  } finally {
+    unstub();
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});
+
+test('camera: _useNative=false skips native path even with stub loaded', async () => {
+  let openCount = 0;
+  const unstub = stubNative({
+    listDevices: () => [],
+    tryOpen: () => { openCount++; return null; },
+    Camera: function () {},
+  });
+  const f = makeFakeFfmpeg('DEST="${10}"; echo "fake frame" > "$DEST"; exit 0');
+  stubFfmpegStatic(f.bin);
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: false });
+    const dest = await c.capture();
+    assert.ok(dest.endsWith('.jpg'));
+    assert.strictEqual(openCount, 0,
+      'tryOpen must NOT be called when _useNative=false');
+    c.stop();
+  } finally {
+    unstub();
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});

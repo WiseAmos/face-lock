@@ -1,6 +1,6 @@
 {
   "name": "face-lock-camera",
-  "version": "0.2.0-alpha.1",
+  "version": "0.2.0-alpha.2",
   "description": "Cross-platform webcam capture for face-lock (NAPI binding over nokhwa)",
   "main": "index.js",
   "types": "index.d.ts",

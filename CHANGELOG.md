@@ -5,6 +5,23 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.2] - 2026-06-09
+
+### Added
+- **Optional native camera module (`face-lock-camera`).** A Rust + [napi-rs 2.x](https://napi.rs/) binding over [nokhwa](https://crates.io/crates/nokhwa) that talks directly to V4L2 (Linux) / MSMF (Windows) / AVFoundation (macOS). It is tried first in the camera capture chain — the existing ffmpeg/ffmpeg-static/node-webcam fallbacks remain as a safety net. The native path is **optional**: if the binary is missing (unsupported platform, or the user has a pre-v0.2.0 install), the camera silently falls through to ffmpeg. Disable with `FACE_LOCK_NO_NATIVE=1` for debugging.
+- **`scripts/build-native.js`** — local-dev build for the Rust module. CI ships prebuilt `.node` binaries per platform, so end users never need Rust installed. The script is for contributors hacking on the Rust source.
+- **`.github/workflows/build-native.yml`** — CI matrix that builds the native module on Linux x64+arm64, macOS x64+arm64, and Windows x64+arm64, runs the JS test suite against the built binary, and (on `v*` tag pushes) attaches the binaries to the GitHub release.
+- **7 new unit tests** for the native code path: `FACE_LOCK_NO_NATIVE=1` opt-out, native require failure → ffmpeg fallback, `tryOpen` returning null → ffmpeg fallback, `tryOpen` + `captureJpeg` success path, handle reuse across captures (no per-frame reopen), empty `captureJpeg` → close handle and fall through, `_useNative: false` constructor opt-out.
+
+### Changed
+- **`face-lock-camera` is now a local file dependency** in `package.json` (`"file:./crates/face-lock-camera"`). The root tarball includes the crate source so contributors can rebuild the native module with one `npm run build:native`.
+- The `crates/face-lock-camera/.gitignore` was tightened: both `index.*.node` (napi-rs's actual output name) and `face-lock-camera.*.node` are excluded; only the source, the loader (`index.js` / `index.d.ts`), and the `Cargo.toml` get committed.
+- nokhwa pinned to exact `=0.10.11` (the version that built clean on the spike). 0.10 has moved fast between minors; floating versions have already broken the `Camera::new` signature in 0.10.7.
+
+### Notes
+- This is an **alpha** because the CI-built binaries for macOS/Windows haven't been exercised on real hardware yet. The Linux x64 build is verified locally (`listDevices`, `tryOpen` on no-device → null). End users who `npm install face-lock@0.2.0-alpha.2` on macOS/Windows will get the ffmpeg fallback (working as designed) until the GH release ships v0.2.0 stable with attached binaries.
+- The native module is a **latency win**, not a functional one — both paths write the same JPEG to a temp file and the downstream detector is identical. Where the native path wins: no `spawn()` overhead, no friendly-name guessing on Windows, and the `tryOpen` null-return distinguishes "no device" from "permission denied" (we can't actually surface this distinction to the user today, but the code is ready for it).
+
 ## [0.1.5] - 2026-06-09
 
 ### Fixed

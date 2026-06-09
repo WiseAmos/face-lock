@@ -2,6 +2,8 @@
 target/
 Cargo.lock
 
-# The .node binary is rebuilt per-platform by CI; we keep the source
-# + scripts + the .d.ts/.js loader, but not the platform-specific binary.
+# The .node binaries are rebuilt per-platform by CI; we keep the source
+# + scripts + the .d.ts/.js loader, but not the platform-specific binaries.
+# napi-rs naming convention is `index.<platform>-<arch>[-<abi>].node`.
+index.*.node
 face-lock-camera.*.node

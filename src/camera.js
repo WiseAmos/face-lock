@@ -6,28 +6,48 @@
  * Returns a path to a saved JPEG. The detector then loads that JPEG.
  *
  * Strategy (in order of preference):
- *   1. `ffmpeg-static`'s bundled ffmpeg binary (works on Win/Mac/Linux out of
- *      the box, no system install required). This is the whole point of the
- *      dep — without it, fresh users hit "spawn ffmpeg ENOENT" and the
- *      wizard dies before they can do anything useful.
- *   2. A system `ffmpeg` on PATH (Linux distros where the user installed it
- *      via apt/brew).
- *   3. On macOS, `imagesnap` (legacy fallback — usually absent on modern
- *      Macs, hence the priority order).
- *   4. `node-webcam` (legacy) — kept in the fallback chain for completeness.
+ *   0. `face-lock-camera` — native NAPI binding (v0.2.0+). Rust + nokhwa
+ *      over V4L2 (Linux) / MSMF (Windows) / AVFoundation (macOS). The
+ *      fastest and most reliable path on real hardware — no shell-spawn
+ *      overhead, no friendly-name guessing. Loaded lazily via
+ *      `require('face-lock-camera')`; if the native binary is missing
+ *      (unsupported platform, or user has a pre-v0.2.0 install) we
+ *      silently fall through.
+ *   1. `ffmpeg-static`'s bundled ffmpeg binary (works on Win/Mac/Linux
+ *      out of the box, no system install required). This is the whole
+ *      point of the dep — without it, fresh users hit "spawn ffmpeg
+ *      ENOENT" and the wizard dies before they can do anything useful.
+ *   2. A system `ffmpeg` on PATH (Linux distros where the user
+ *      installed it via apt/brew).
+ *   3. On macOS, `imagesnap` (legacy fallback — usually absent on
+ *      modern Macs, hence the priority order).
+ *   4. `node-webcam` (legacy) — kept in the fallback chain for
+ *      completeness.
  *
  * Windows dshow device name:
- *   ffmpeg's dshow backend requires the *exact* friendly name of the camera
- *   (e.g. "HD Webcam", "Integrated Camera", "USB2.0 HD UVC WebCam"). The
- *   "USB Camera" default that 0.1.4 hardcoded rarely matches real devices,
- *   which caused "ffmpeg ran but produced 0-byte output → fallback exhausted"
- *   errors. On Windows we now probe `ffmpeg -list_devices true -f dshow -i
- *   dummy` at first capture and use the first video device we find. Cached
- *   on the Camera instance.
+ *   ffmpeg's dshow backend requires the *exact* friendly name of the
+ *   camera (e.g. "HD Webcam", "Integrated Camera", "USB2.0 HD UVC
+ *   WebCam"). The "USB Camera" default that 0.1.4 hardcoded rarely
+ *   matches real devices, which caused "ffmpeg ran but produced 0-byte
+ *   output → fallback exhausted" errors. On Windows we now probe
+ *   `ffmpeg -list_devices true -f dshow -i dummy` at first capture and
+ *   use the first video device we find. Cached on the Camera instance.
  *
- * If everything fails, throws an error that includes the OS, the platform
- * binary path, and the exact `ffmpeg` command that was tried, so the user
- * can debug without grepping source.
+ * If everything fails, throws an error that includes the OS, the
+ * platform binary path, and the exact `ffmpeg` command that was tried,
+ * so the user can debug without grepping source.
+ *
+ * Native module opt-out:
+ *   Tests run on machines that may not have a webcam and definitely
+ *   don't want a native module load. The Camera constructor accepts
+ *   `_useNative: false` (default in tests) to skip the native path
+ *   entirely. End users get `_useNative: true` (default when not
+ *   explicitly set) so the v0.2.0 fast path is on by default.
+ *
+ *   The native path is also auto-disabled if:
+ *   - `FACE_LOCK_NO_NATIVE=1` is in the environment (escape hatch)
+ *   - `require('face-lock-camera')` throws (binary missing)
+ *   - `tryOpen()` returns null (no device / busy / permission denied)
  */
 
 const fs = require('fs');
@@ -51,6 +71,41 @@ try {
   // not installed
 }
 
+// Native module: loaded lazily. The require itself is wrapped in
+// try/catch so a missing binary (unsupported platform) degrades to
+// ffmpeg rather than crashing the whole app.
+let native = null;
+let nativeLoadError = null;
+function loadNative() {
+  if (native !== null || nativeLoadError !== null) return native;
+  try {
+    // eslint-disable-next-line global-require
+    native = require('face-lock-camera');
+  } catch (e) {
+    nativeLoadError = e;
+  }
+  return native;
+}
+
+const NATIVE_OPT_OUT_ENV = 'FACE_LOCK_NO_NATIVE';
+/**
+ * Returns true if the native code path should be tried.
+ *
+ * The constructor option is `_useNative`:
+ *   - `_useNative: true`  → use native (default behavior)
+ *   - `_useNative: false` → skip native, go straight to ffmpeg
+ *   - `_useNative: undefined` → use native unless env var opts out
+ *
+ * The env var `FACE_LOCK_NO_NATIVE=1` is a global escape hatch that
+ * forces ffmpeg-only mode regardless of the constructor option.
+ */
+function nativeEnabled(useNative) {
+  if (useNative === false) return false; // explicit opt-out
+  // any other value (true or undefined) → default on, but env var
+  // can still disable it
+  return !process.env[NATIVE_OPT_OUT_ENV];
+}
+
 class Camera {
   constructor({
     index = -1,
@@ -59,6 +114,8 @@ class Camera {
     outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'face-lock-')),
     // Inject for tests: skip the device probe
     _probeDshowDevices = true,
+    // Inject for tests: skip the native path entirely
+    _useNative = undefined,
   } = {}) {
     this.index = index;
     this.width = width;
@@ -67,9 +124,31 @@ class Camera {
     this.lastTried = null; // for error messages
     this._probeDshowDevices = _probeDshowDevices;
     this._dshowDevice = null; // cached after first probe
+    this._useNative = _useNative;
+    this._nativeHandle = null; // the native Camera instance, opened lazily
   }
 
   async capture() {
+    // Try the native path first. The cost of probing is a `require()` +
+    // a `tryOpen()` (synchronous, ~1ms on success, ~0ms on null). If
+    // either fails we fall through to the existing async paths.
+    if (nativeEnabled(this._useNative)) {
+      this._nativeAttempted = true;
+      try {
+        return await this.nativeCapture();
+      } catch (e) {
+        // Native path failed. Record both the message (for debug) and
+        // mark this attempt for telemetry. We do NOT overwrite
+        // `lastTried` here — that field is meant to record the last
+        // command we actually ran, and the ffmpeg path may overwrite
+        // it on success. The native failure is preserved in
+        // `nativeFailureMessage` for the test/error path.
+        this.nativeFailureMessage = e.message;
+      }
+    } else {
+      this._nativeAttempted = false;
+    }
+
     if (nodeWebcam) {
       try {
         return await this.nodeWebcamCapture();
@@ -78,6 +157,49 @@ class Camera {
       }
     }
     return this.ffmpegCapture();
+  }
+
+  /**
+   * Native capture path (v0.2.0+).
+   *
+   * Opens the device via `tryOpen()` (which returns null on failure
+   * rather than throwing — that's the whole point of the Option Y
+   * design). If we got a handle, we call `captureJpeg()` and write
+   * the resulting Buffer to a temp file. The downstream detector
+   * expects a file path, not a buffer, so we always go through disk.
+   *
+   * Re-uses the same handle across calls — opening the device is the
+   * expensive part (~30-100ms on real hardware). Close is deferred to
+   * `stop()` or the first capture error (so a transient device error
+   * retries the open next call).
+   */
+  async nativeCapture() {
+    const mod = loadNative();
+    if (!mod) throw new Error('face-lock-camera: native module not available');
+
+    if (!this._nativeHandle) {
+      this._nativeHandle = mod.tryOpen(this.index, this.width, this.height);
+      if (!this._nativeHandle) {
+        // No device, or permission denied, or busy. The ffmpeg path
+        // can still work in the first two cases (different process,
+        // different permission model), so we surface this as a normal
+        // "try next" signal — the outer `capture()` swallows the throw.
+        throw new Error('tryOpen returned null');
+      }
+    }
+
+    const jpeg = this._nativeHandle.captureJpeg();
+    if (!Buffer.isBuffer(jpeg) || jpeg.length === 0) {
+      // Bad frame — close the handle so the next capture re-opens,
+      // and bail out to the fallback.
+      try { this._nativeHandle.close(); } catch (_) { /* */ }
+      this._nativeHandle = null;
+      throw new Error('captureJpeg returned empty buffer');
+    }
+
+    const dest = path.join(this.outputDir, `frame-native-${Date.now()}.jpg`);
+    fs.writeFileSync(dest, jpeg);
+    return dest;
   }
 
   nodeWebcamCapture() {
@@ -109,9 +231,9 @@ class Camera {
    * Windows: DirectShow. macOS/Linux: avfoundation / v4l2.
    * On macOS we also accept the legacy "USB Camera" device name.
    *
-   * `win32DeviceName` (used only on win32) is the friendly name of the dshow
-   * device — we default to "USB Camera" but the caller should normally have
-   * resolved it via `_resolveDshowDevice()` first.
+   * `win32DeviceName` (used only on win32) is the friendly name of the
+   * dshow device — we default to "USB Camera" but the caller should
+   * normally have resolved it via `_resolveDshowDevice()` first.
    */
   ffmpegArgs(dest, win32DeviceName) {
     const w = this.width;
@@ -150,14 +272,15 @@ class Camera {
   }
 
   /**
-   * On Windows, ask ffmpeg to list available dshow devices and return the
-   * friendly name of the first VIDEO device. Cached on the instance.
+   * On Windows, ask ffmpeg to list available dshow devices and return
+   * the friendly name of the first VIDEO device. Cached on the instance.
    *
-   * Returns null on non-Windows, when probing is disabled (tests), or when
-   * the probe fails (we fall through to the hardcoded "USB Camera" default).
+   * Returns null on non-Windows, when probing is disabled (tests), or
+   * when the probe fails (we fall through to the hardcoded "USB
+   * Camera" default).
    *
-   * ffmpeg's stderr output for `ffmpeg -list_devices true -f dshow -i dummy`
-   * looks like:
+   * ffmpeg's stderr output for
+   * `ffmpeg -list_devices true -f dshow -i dummy` looks like:
    *
    *   [dshow @ 0x...] DirectShow video devices
    *   [dshow @ 0x...]  "HD Webcam"
@@ -165,8 +288,8 @@ class Camera {
    *   [dshow @ 0x...] DirectShow audio devices
    *   [dshow @ 0x...]  "Microphone (Realtek Audio)"
    *
-   * We grab every quoted string that appears AFTER "DirectShow video devices"
-   * and BEFORE "DirectShow audio devices" (or end of output).
+   * We grab every quoted string that appears AFTER "DirectShow video
+   * devices" and BEFORE "DirectShow audio devices" (or end of output).
    */
   _resolveDshowDevice() {
     if (os.platform() !== 'win32') return null;
@@ -206,12 +329,14 @@ class Camera {
   }
 
   /**
-   * Parse ffmpeg's `-list_devices` stderr output. Returns the first video
-   * device name, or null if none found. Pure function — exposed for tests.
+   * Parse ffmpeg's `-list_devices` stderr output. Returns the first
+   * video device name, or null if none found. Pure function — exposed
+   * for tests.
    */
   _parseDshowListDevices(output) {
     // ffmpeg prints the video list block before the audio list block.
-    // We split on the markers (when present) and only look at the video half.
+    // We split on the markers (when present) and only look at the
+    // video half.
     const VIDEO_START = 'DirectShow video devices';
     const VIDEO_END = 'DirectShow audio devices';
     const vi = output.indexOf(VIDEO_START);
@@ -227,7 +352,8 @@ class Camera {
   }
 
   ffmpegCapture() {
-    // On Windows, resolve the dshow device name (probes once, then cached).
+    // On Windows, resolve the dshow device name (probes once, then
+    // cached).
     let win32DeviceName;
     if (os.platform() === 'win32') {
       win32DeviceName = this._resolveDshowDevice() || 'USB Camera';
@@ -237,7 +363,8 @@ class Camera {
     const args = this.ffmpegArgs(dest, win32DeviceName);
     const tryOrder = [];
     if (bundledFfmpeg && fs.existsSync(bundledFfmpeg)) tryOrder.push(bundledFfmpeg);
-    // System ffmpeg last — PATH lookup. We don't know if it exists until spawn.
+    // System ffmpeg last — PATH lookup. We don't know if it exists
+    // until spawn.
     tryOrder.push(os.platform() === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
     if (os.platform() === 'darwin') tryOrder.push('imagesnap');
 
@@ -267,8 +394,8 @@ class Camera {
           if (code === 0 && fs.existsSync(dest) && fs.statSync(dest).size > 0) {
             return resolve(dest);
           }
-          // ffmpeg ran but produced nothing — usually wrong device name.
-          // Try the next candidate (system ffmpeg or imagesnap).
+          // ffmpeg ran but produced nothing — usually wrong device
+          // name. Try the next candidate (system ffmpeg or imagesnap).
           tryNext(i + 1);
         });
       };
@@ -277,6 +404,12 @@ class Camera {
   }
 
   stop() {
+    // Close the native handle if we have one. Idempotent — close() is
+    // a no-op when called twice.
+    if (this._nativeHandle) {
+      try { this._nativeHandle.close(); } catch (_) { /* */ }
+      this._nativeHandle = null;
+    }
     try {
       const files = fs.readdirSync(this.outputDir);
       for (const f of files) {
@@ -287,4 +420,4 @@ class Camera {
   }
 }
 
-module.exports = { Camera };
+module.exports = { Camera, nativeEnabled };

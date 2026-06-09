@@ -42,3 +42,7 @@ dist/
 build/
 out/
 *.tgz
+
+# Test-generated native module stub (camera.test.js native-path tests)
+# Auto-created at runtime by the test suite to satisfy Module._load.
+test/_native_stub.js

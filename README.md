@@ -217,6 +217,25 @@ npm test                # node --test test/*.test.js
 node scripts/smoke.js   # CLI sanity check
 ```
 
+### Building the native camera module (optional)
+
+v0.2.0-alpha.2 ships an optional Rust + napi-rs camera binding
+(`crates/face-lock-camera/`) that talks directly to V4L2/MSMF/AVFoundation.
+Prebuilt `.node` binaries are attached to each GitHub release, so end users
+**do not** need Rust installed. Contributors hacking on the Rust source:
+
+```bash
+# One-time: install Rust from https://rustup.rs
+npm run build:native    # builds + installs the binary into node_modules/
+FACE_LOCK_NO_NATIVE=0   # default — native is tried first
+FACE_LOCK_NO_NATIVE=1   # force the ffmpeg fallback (debug)
+```
+
+The CI matrix in `.github/workflows/build-native.yml` builds the same
+target list as `napi.targets` in `crates/face-lock-camera/package.json`
+(Linux x64+arm64, macOS x64+arm64, Windows x64+arm64) and attaches the
+binaries to the GitHub release on `v*` tag pushes.
+
 ## License
 
 MIT © 2026 Amos Goh

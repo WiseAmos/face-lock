@@ -15,7 +15,10 @@ napi = { version = "2", default-features = false, features = ["napi4", "serde-js
 napi-derive = { version = "2", features = ["type-def"] }
 
 # nokhwa: cross-platform webcam capture (V4L2 / MSMF / AVFoundation)
-nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+# Pinned to exact 0.10.11 — the 0.10 minor is fast-moving and the API has
+# broken between minors in the past (e.g. Camera::new signature changes
+# in 0.10.7). Bump deliberately and re-test the spike before relaxing.
+nokhwa = { version = "=0.10.11", default-features = false, features = ["input-native"] }
 
 # image: convert raw RGB frame to JPEG before returning to JS
 # Using image = "0.24" — precompile, mature, well-supported.
