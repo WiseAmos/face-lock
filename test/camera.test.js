@@ -160,6 +160,77 @@ test('camera: _parseDshowListDevices returns null on no markers', () => {
   c.stop();
 });
 
+test('camera: _parseDshowListDevices handles gyan.dev ffmpeg 6.0 inline-tag format (no markers)', () => {
+  // THIS IS THE FORMAT THE WIN32-X64 BUNDLED FFMPEG ACTUALLY USES.
+  // It omits "DirectShow video devices" / "DirectShow audio devices"
+  // markers and lists devices inline with (video)/(audio) tags. The
+  // previous parser returned null here, causing face-lock to fall
+  // through to a hardcoded "USB Camera" device name that doesn't
+  // exist on the user's machine.
+  //
+  // Real output captured from a Windows 11 Acer laptop with the
+  // gyan.dev ffmpeg 6.0 essentials build (vendored in alpha.3+).
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = [
+    'ffmpeg version 6.0-essentials_build-www.gyan.dev Copyright (c) 2000-2023 the FFmpeg developers',
+    '  built with gcc 12.2.0 (Rev10, Built by MSYS2 project)',
+    '[dshow @ 0000027e401bb440] "ACER FHD User Facing" (video)',
+    '[dshow @ 0000027e401bb440]   Alternative name "@device_pnp_\\\\?\\\\usb#vid_04f2&pid_b777&mi_00#6&2ecefdb3&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\\\global"',
+    '[dshow @ 0000027e401bb440] "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)" (audio)',
+    '[dshow @ 0000027e401bb440]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\\\wave_{E6B4EF4D-7EED-4945-8E08-DD38E8630D99}"',
+    'dummy: Immediate exit requested',
+  ].join('\r\n');
+  const got = c._parseDshowListDevices(sample);
+  assert.strictEqual(got, 'ACER FHD User Facing',
+    'must extract the video device, not the audio mic, not the PnP GUID');
+  c.stop();
+});
+
+test('camera: _parseDshowListDevices inline-tag format skips Alternative-name and audio lines', () => {
+  // Edge case: audio devices listed BEFORE video devices, with
+  // "Alternative name" lines interleaved. The parser must pick the
+  // first quoted name that has `(video)` immediately after it.
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = [
+    '[dshow @ 0x1] "Realtek Audio" (audio)',
+    '[dshow @ 0x1]   Alternative name "@device_cm_aaa"',
+    '[dshow @ 0x1] "Logitech BRIO" (video)',
+    '[dshow @ 0x1]   Alternative name "@device_pnp_bbb"',
+  ].join('\n');
+  assert.strictEqual(c._parseDshowListDevices(sample), 'Logitech BRIO');
+  c.stop();
+});
+
+test('camera: _parseDshowListDevices returns null on gyan format with no video device', () => {
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = [
+    '[dshow @ 0x1] "Realtek Audio" (audio)',
+    'dummy: Immediate exit requested',
+  ].join('\n');
+  assert.strictEqual(c._parseDshowListDevices(sample), null,
+    'audio-only output must return null, not pick the audio device');
+  c.stop();
+});
+
+test('camera: _parseDshowListDevices prefers the marker-header parser when both are present', () => {
+  // If ffmpeg somehow prints BOTH formats (e.g. a wrapper that adds
+  // markers), the marker-header parser should win because it only
+  // looks at the video block.
+  const { Camera } = require('../src/camera');
+  const c = new Camera({});
+  const sample = [
+    '[dshow @ 0x1] DirectShow video devices',
+    '[dshow @ 0x1]  "First Video"',
+    '[dshow @ 0x1] DirectShow audio devices',
+    '[dshow @ 0x1]  "Some Audio" (audio)',
+  ].join('\n');
+  assert.strictEqual(c._parseDshowListDevices(sample), 'First Video');
+  c.stop();
+});
+
 test('camera: _resolveDshowDevice is a no-op on non-Windows', () => {
   const { Camera } = require('../src/camera');
   const c = new Camera({ _probeDshowDevices: true });

@@ -5,6 +5,26 @@ All notable changes to `face-lock` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.5] - 2026-06-09
+
+### Fixed
+- **dshow device probe parser now handles the gyan.dev ffmpeg 6.0 output format.** The previous parser looked for `DirectShow video devices` / `DirectShow audio devices` header markers, but the ffmpeg 6.0 essentials build we vendor for win32-x64 (from gyan.dev) **omits those markers** and lists devices inline with `(video)` / `(audio)` tags. Result: the probe always returned null on Windows, face-lock fell through to the hardcoded `USB Camera` fallback, and ffmpeg correctly errored out with `Could not find video device with name [USB Camera]` even when a perfectly good webcam was connected.
+  - New parser supports BOTH output formats: marker-header (most ffmpeg builds) and inline-tag (gyan.dev 6.0).
+  - The inline-tag parser explicitly skips `Alternative name` lines (PnP GUIDs) and audio devices, picking the first quoted name followed by ` (video)`.
+- Loosened the marker-header parser's dshow-prefix regex to accept both `[dshow]` and `[dshow @ 0x...]` forms (different ffmpeg builds vary).
+
+### Tests
+- 4 new tests for `_parseDshowListDevices`:
+  - Real Acer laptop output from the alpha.4 E2E failure (gyan format with `ACER FHD User Facing`)
+  - Audio-before-video edge case (must pick first video, not first device)
+  - Audio-only input must return null, not pick an audio mic
+  - When both formats are present, the marker-header parser wins
+- Full suite: **70/70 pass** (was 66).
+
+### Notes
+- This is the actual fix for the alpha.3/alpha.4 Windows E2E failure. The previous release (alpha.4) only surfaced the underlying cause; this release addresses it.
+- No code-path changes for the happy path; only the device-name discovery path changed.
+
 ## [0.2.0-alpha.4] - 2026-06-09
 
 ### Fixed

@@ -368,23 +368,79 @@ class Camera {
    * Parse ffmpeg's `-list_devices` stderr output. Returns the first
    * video device name, or null if none found. Pure function — exposed
    * for tests.
+   *
+   * Two output formats are supported:
+   *
+   * 1. ffmpeg 4.x / most builds — prints marker headers:
+   *
+   *      [dshow @ 0x...] DirectShow video devices
+   *      [dshow @ 0x...]  "HD Webcam"
+   *      [dshow @ 0x...]  "USB2.0 HD UVC WebCam"
+   *      [dshow @ 0x...] DirectShow audio devices
+   *      [dshow @ 0x...]  "Microphone (Realtek Audio)"
+   *
+   * 2. ffmpeg 6.0 from gyan.dev (the build we vendor for win32-x64) —
+   *    omits the markers, lists devices inline with `(video)` / `(audio)` tags:
+   *
+   *      [dshow @ 0x...] "ACER FHD User Facing" (video)
+   *      [dshow @ 0x...]   Alternative name "@device_pnp_..."
+   *      [dshow @ 0x...] "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)" (audio)
+   *      dummy: Immediate exit requested
+   *
+   * Strategy: split into lines, walk the lines, and find the first
+   * quoted string on a line that has `(video)` AFTER the closing
+   * quote. The "Alternative name" lines have the same structure but
+   * precede the device name; we skip past them by requiring `(video)`
+   * on the same line.
    */
   _parseDshowListDevices(output) {
-    // ffmpeg prints the video list block before the audio list block.
-    // We split on the markers (when present) and only look at the
-    // video half.
+    // 1) Marker-header format (most ffmpeg builds). Look for the
+    //    "DirectShow video devices" / "DirectShow audio devices"
+    //    block boundaries and grab the first quoted name inside.
     const VIDEO_START = 'DirectShow video devices';
     const VIDEO_END = 'DirectShow audio devices';
     const vi = output.indexOf(VIDEO_START);
-    if (vi < 0) return null;
-    let block = output.slice(vi + VIDEO_START.length);
-    const ai = block.indexOf(VIDEO_END);
-    if (ai >= 0) block = block.slice(0, ai);
-    // Lines look like:  [dshow @ 0x...]  "Device Name"
-    // Match the FIRST quoted string in the video block.
-    const m = block.match(/^[^"]*"\s*([^"]+?)\s*"/m) || block.match(/"\s*([^"]+?)\s*"/);
-    if (!m) return null;
-    return m[1].trim();
+    if (vi >= 0) {
+      let block = output.slice(vi + VIDEO_START.length);
+      const ai = block.indexOf(VIDEO_END);
+      if (ai >= 0) block = block.slice(0, ai);
+      // Lines look like:  [dshow @ 0x...]  "Device Name"   (optional: (video))
+      // Match the FIRST quoted string in the video block. Strip
+      // "Alternative name" lines by requiring the device-name form
+      // (no leading "Alternative name" token before the quote).
+      // We use a non-greedy match for the quoted content and require
+      // the line to start with a [dshow @ ...] prefix.
+      const lines = block.split(/\r?\n/);
+      for (const line of lines) {
+        // Skip "Alternative name" lines and lines that don't have a
+        // dshow prefix (the header marker lines themselves, blank
+        // lines, etc.). We accept "[dshow]" or "[dshow @ 0x...]" —
+        // the exact contents after [dshow vary by ffmpeg build.
+        if (/Alternative name/.test(line)) continue;
+        if (!/^\[dshow(\s+@[\s\S]*)?\]/i.test(line.trim())) continue;
+        // Grab the first quoted string on this line.
+        const m = line.match(/"([^"]+)"/);
+        if (m) return m[1].trim();
+      }
+      // Fall through to the inline-tag parser below.
+    }
+
+    // 2) Inline-tag format (gyan.dev ffmpeg 6.0 build). No markers;
+    //    devices are listed with `(video)` / `(audio)` tags appended.
+    //    Find the first quoted name that is followed by ` (video)`.
+    //    We scan line-by-line to avoid matching the "Alternative name"
+    //    pattern (which is a quoted GUID/pnp-path, NOT a friendly name).
+    const lines = output.split(/\r?\n/);
+    for (const line of lines) {
+      if (/Alternative name/i.test(line)) continue;
+      // Match:  ... "Some Device Name" (video)
+      // The closing quote must be immediately followed by ` (video)`
+      // (with optional whitespace). The non-greedy `+?` inside the
+      // quotes prevents matching across multiple quoted segments.
+      const m = line.match(/"([^"]+?)"\s*\(video\)/i);
+      if (m) return m[1].trim();
+    }
+    return null;
   }
 
   ffmpegCapture() {
