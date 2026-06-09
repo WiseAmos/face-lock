@@ -1,0 +1,29 @@
+{
+  "name": "face-lock-camera",
+  "version": "0.2.0-alpha.1",
+  "description": "Cross-platform webcam capture for face-lock (NAPI binding over nokhwa)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "napi": {
+    "binaryName": "face-lock-camera",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release --strip --js index.js --dts index.d.ts",
+    "build:debug": "napi build --platform --js index.js --dts index.d.ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  }
+}

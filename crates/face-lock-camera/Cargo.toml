@@ -1,0 +1,33 @@
+[package]
+name = "face-lock-camera"
+version = "0.2.0-alpha.1"
+edition = "2021"
+description = "Cross-platform webcam capture for face-lock (NAPI binding over nokhwa)"
+license = "MIT"
+repository = "https://github.com/WiseAmos/face-lock"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# napi-rs: Node.js N-API binding generator + runtime
+napi = { version = "2", default-features = false, features = ["napi4", "serde-json"] }
+napi-derive = { version = "2", features = ["type-def"] }
+
+# nokhwa: cross-platform webcam capture (V4L2 / MSMF / AVFoundation)
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+
+# image: convert raw RGB frame to JPEG before returning to JS
+# Using image = "0.24" — precompile, mature, well-supported.
+image = { version = "0.24", default-features = false, features = ["jpeg"] }
+
+# error handling
+thiserror = "1"
+
+# macOS-only: nokhwa_initialize quirk
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = "0.2"
+
+[build-dependencies]
+napi-build = "2"
