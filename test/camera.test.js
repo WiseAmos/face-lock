@@ -22,7 +22,12 @@ const os = require('os');
 function makeFakeFfmpeg(script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-fake-ffmpeg-'));
   const bin = path.join(dir, 'ffmpeg');
-  fs.writeFileSync(bin, `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+  // Shebang MUST be /bin/bash (not /bin/sh) because dash (the default /bin/sh
+  // on Debian/Ubuntu) does not support \xNN hex escapes in its printf
+  // builtin. The fake scripts use printf '\\xff\\xd8...' to emit raw JPEG
+  // bytes — dash emits the literal four characters and the stream parser
+  // never sees the SOI/EOI markers.
+  fs.writeFileSync(bin, `#!/bin/bash\n${script}\n`, { mode: 0o755 });
   return { dir, bin };
 }
 
@@ -608,3 +613,82 @@ test('camera: _useNative=false skips native path even with stub loaded', async (
     cleanupFake(f.dir);
   }
 });
+
+// =====================================================================
+// Regression: camera must support a continuous-stream mode so the
+// monitor loop doesn't reopen the device every 500ms (causes visible
+// LED flashing and "your camera is in use" toast spam on Windows).
+//
+// The new interface is:
+//   cam.startStream()   - spawns ffmpeg with -f image2pipe, returns handle
+//   cam.readFrame()     - reads one JPEG frame from stdout, returns Buffer
+//   cam.stopStream()    - terminates the ffmpeg process, releases the device
+//
+// This test verifies the interface exists and readFrame() returns a
+// valid JPEG buffer (SOI 0xFF 0xD8 ... EOI 0xFF 0xD9). We stub ffmpeg
+// to print a tiny JPEG to stdout.
+// =====================================================================
+
+test('camera: stream interface exists and readFrame returns JPEG buffer', async () => {
+  // Fake ffmpeg in stream mode: emit one valid JPEG frame to stdout
+  // (SOI marker, 4 bytes of payload, EOI marker) and stay alive.
+  // The stream-mode ffmpeg args would include -f image2pipe -vcodec mjpeg
+  // — we detect that pattern in the fake script.
+  const FAKE_JPEG = Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0,  // SOI + APP0 marker
+    0x00, 0x10,               // APP0 length 16
+    0x4a, 0x46, 0x49, 0x46, 0x00,  // "JFIF\0"
+    0x01, 0x01, 0x00, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00,  // version + density
+    0xff, 0xd9,               // EOI
+  ]);
+  // Detect stream mode by looking for "image2pipe" in argv.
+  // (Bash loops over "$@"; if "image2pipe" is in args, stream to stdout.)
+  const fakeScript = `
+    for arg in "$@"; do
+      if [ "$arg" = "image2pipe" ]; then
+        # Stream mode: emit one JPEG to stdout, then loop emitting more
+        # until killed. We use 'printf' (not 'cat' from a heredoc)
+        # because printf processes \\xNN hex escapes into raw bytes,
+        # whereas a heredoc would emit the literal four characters.
+        # We deliberately drop 'sleep' — bash's pipe buffer flushes
+        # when full, which happens on the second iteration of the loop.
+        printf '\\xff\\xd8\\xff\\xe0\\x00\\x10JFIF\\x00\\x01\\x01\\x00\\x00\\x48\\x00\\x48\\x00\\x00\\xff\\xd9'
+        while true; do
+          printf '\\xff\\xd8\\xff\\xe0\\x00\\x10JFIF\\x00\\x01\\x01\\x00\\x00\\x48\\x00\\x48\\x00\\x00\\xff\\xd9'
+        done
+        exit 0
+      fi
+    done
+    # Fall-through (one-shot mode): write to $1
+    DEST="$1"; printf 'fake' > "$DEST"
+  `;
+  const f = makeFakeFfmpeg(fakeScript);
+  stubFfmpegStatic(f.bin);
+  try {
+    const { Camera } = freshCamera();
+    const c = new Camera({ index: 0, _useNative: false });
+    // The interface must exist
+    assert.strictEqual(typeof c.startStream, 'function',
+      'Camera must expose startStream()');
+    assert.strictEqual(typeof c.readFrame, 'function',
+      'Camera must expose readFrame()');
+    assert.strictEqual(typeof c.stopStream, 'function',
+      'Camera must expose stopStream()');
+
+    // Start the stream, read a frame, verify it's a JPEG buffer
+    await c.startStream();
+    const frame = await c.readFrame();
+    assert.ok(Buffer.isBuffer(frame), 'readFrame must return a Buffer');
+    assert.ok(frame.length >= 4, 'frame must have at least SOI+EOI');
+    assert.strictEqual(frame[0], 0xff, 'frame must start with JPEG SOI 0xFF');
+    assert.strictEqual(frame[1], 0xd8, 'frame must start with JPEG SOI 0xD8');
+    assert.strictEqual(frame[frame.length - 2], 0xff, 'frame must end with JPEG EOI 0xFF');
+    assert.strictEqual(frame[frame.length - 1], 0xd9, 'frame must end with JPEG EOI 0xD9');
+    await c.stopStream();
+    c.stop();
+  } finally {
+    resetFfmpegStatic();
+    cleanupFake(f.dir);
+  }
+});
+

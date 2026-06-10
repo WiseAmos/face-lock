@@ -17,8 +17,8 @@ const realProfile = {
   threshold: 0.55,
 };
 
-function makeMonitor({ detect, graceMs = 1000, softBlock = false, softBlockDelayMs = 100, minPresentFrames = 1 } = {}) {
-  const events = { left: 0, returned: 0, lock: 0, softBlock: 0 };
+function makeMonitor({ detect, graceMs = 1000, softBlock = false, softBlockDelayMs = 100, minPresentFrames = 1, unlockResetMs = 1500 } = {}) {
+  const events = { left: 0, returned: 0, lock: 0, softBlock: 0, unlocked: 0 };
   // We override isMatch on the instance so we can test by string label
   // (real profile.match() uses Euclidean distance, which is verified in profile.test.js).
   // The monitor BOTH emits events AND invokes the action callback (sleepFn/lockFn).
@@ -27,7 +27,7 @@ function makeMonitor({ detect, graceMs = 1000, softBlock = false, softBlockDelay
     config: {
       graceMs, detectionIntervalMs: 100, matchThreshold: 0.55,
       minPresentFrames, softBlockEnabled: softBlock, softBlockDelayMs,
-      cameraIndex: -1, logLevel: 0,
+      cameraIndex: -1, logLevel: 0, unlockResetMs,
     },
     frameSource: { getFrame: async () => ({ __frame: true }) },
     sleepFn: () => {},
@@ -40,6 +40,7 @@ function makeMonitor({ detect, graceMs = 1000, softBlock = false, softBlockDelay
   m.on('returned',   () => events.returned++);
   m.on('lock',       () => events.lock++);
   m.on('soft-block', () => events.softBlock++);
+  m.on('unlocked',   () => events.unlocked++);
   return { m, events };
 }
 
@@ -83,11 +84,13 @@ test('present → left → grace expires → lock fires once', async () => {
   await wait(200);          // past grace
   assert.equal(m.state, STATE.LOCKED);
   assert.equal(events.lock, 1);
-  // any-face detection must NOT unlock — even when "you" is true,
-  // state stays LOCKED (we already locked, OS requires password)
+  // A single transient match in LOCKED is NOT enough to reset.
+  // The user must sustain a match for unlockResetMs before we transition
+  // LOCKED → PRESENT. See regression test "LOCKED → PRESENT: sustained
+  // match after OS unlock resets monitor" for the happy path.
   you = true;
   await m.tick();
-  assert.equal(m.state, STATE.LOCKED);
+  assert.equal(m.state, STATE.LOCKED, 'a single frame match must not reset from LOCKED');
   m.stop();
 });
 
@@ -468,5 +471,96 @@ test('liveness: disabled in config → no liveness rejection even with still nos
   assert.equal(events.livenessFail, 0, 'liveness off → no liveness-fail events');
   assert.equal(events.left, 0, 'liveness off → still nose does not trigger grace');
   assert.equal(m.state, STATE.PRESENT);
+  m.stop();
+});
+
+// =====================================================================
+// Regression: after OS lock fires, sustained matched face must transition
+// LOCKED → PRESENT (the user has manually unlocked and is back at the
+// desk). Threat model: only the enrolled user's face can pass the match
+// check; a photo/video fails liveness. So a sustained match after LOCKED
+// is safe to interpret as "the user is back, resume monitoring."
+//
+// v0.2.0-alpha.7 was a terminal LOCKED state. This test guards against
+// regressing to that behavior.
+// =====================================================================
+
+test('LOCKED → PRESENT: sustained match after OS unlock resets monitor', async () => {
+  let you = true;
+  const { m, events } = makeMonitor({
+    detect: () => (you ? { descriptor: { label: 'me' } } : null),
+    graceMs: 100,
+  });
+  m.start();
+  // 1) Walk away: PRESENT → GRACE → LOCKED
+  you = false;
+  await m.tick();
+  await wait(200);
+  assert.equal(m.state, STATE.LOCKED, 'sanity: grace expired, locked');
+  assert.equal(events.lock, 1);
+
+  // 2) User comes back (unlocks the OS at the password prompt)
+  you = true;
+  // 3) Sustained match for unlockResetMs (default 2000ms). With
+  //    detectionIntervalMs=100 we need 20 consecutive ticks to clear it.
+  for (let i = 0; i < 30; i++) {
+    await m.tick();
+    await wait(100);
+    if (m.state === STATE.PRESENT) break;
+  }
+  assert.equal(m.state, STATE.PRESENT,
+    'after sustained match in LOCKED, monitor must transition to PRESENT');
+  assert.equal(events.lock, 1, 'lock event count must NOT increment again');
+  m.stop();
+});
+
+test('LOCKED → PRESENT: a single transient match is NOT enough', async () => {
+  // Counter-test: a single frame match (or very brief streak) must not
+  // unlock the monitor. This guards against random liveness false-positives
+  // or a stranger leaning into view triggering an unlock.
+  let you = false;
+  const { m } = makeMonitor({
+    detect: () => (you ? { descriptor: { label: 'me' } } : null),
+    graceMs: 50,
+  });
+  m.start();
+  you = false;
+  await m.tick();
+  await wait(100);
+  assert.equal(m.state, STATE.LOCKED);
+  // One transient tick
+  you = true;
+  await m.tick();
+  await wait(50);
+  assert.equal(m.state, STATE.LOCKED,
+    'a single match in LOCKED must NOT immediately transition to PRESENT');
+  m.stop();
+});
+
+test('LOCKED → PRESENT: livenessEnabled must also pass for reset', async () => {
+  // When liveness is on, a match alone (without liveness) must NOT
+  // reset the monitor. Same threat model: liveness catches photos.
+  let you = true;
+  // detection has no landmarks → liveness check returns no-detection.
+  // With livenessEnabled=true that should treat the face as not-you.
+  const { m } = makeMonitor({
+    detect: () => (you ? { descriptor: { label: 'me' } } : null),
+    graceMs: 50,
+  });
+  m.cfg.livenessEnabled = true;  // turn on liveness (test default is off)
+  m.start();
+  you = false;
+  await m.tick();
+  await wait(100);
+  assert.equal(m.state, STATE.LOCKED);
+  // Match arrives but liveness rejects (no landmarks → no-detection)
+  you = true;
+  for (let i = 0; i < 30; i++) {
+    await m.tick();
+    await wait(100);
+  }
+  // Liveness keeps rejecting → still in LOCKED.
+  assert.equal(m.state, STATE.LOCKED,
+    'liveness must block the LOCKED→PRESENT reset just like it blocks the GRACE→PRESENT path');
   m.stop();
 });

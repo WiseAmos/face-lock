@@ -12,7 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > if you maintain a mirror).
 >
 > **Retest instruction:** use `npm install -g face-lock@next` to get
-> alpha.7, not alpha.6.
+> alpha.8, not alpha.6 or alpha.7.
+
+## [0.2.0-alpha.8] - 2026-06-10
+
+### Fixed
+
+**Three Windows-quality issues reported during alpha.7 testing — all addressed.**
+
+- **Windows camera LED stopped flickering.** The monitor loop was calling `cam.capture()` every 500ms, which on Windows spawns a fresh `ffmpeg` process (or opens the camera via the `node-webcam` native path), grabs one frame, writes it to a temp file, then unlinks the file and exits. Doing this twice per second meant the camera was being opened and closed 2×/sec — Windows shows "your camera is in use" toast and toggles the camera LED each time.
+  - **Fix: continuous stream mode.** `Camera` now exposes `startStream()` / `readFrame({ timeoutMs })` / `stopStream()`. A long-lived `ffmpeg` child runs `image2pipe` (MJPEG to stdout, 2 fps) and frames are parsed in-process (SOI/EOI JPEG splitter). The monitor loop calls `readFrame()` per tick and gets the most recent complete JPEG `Buffer` — no more open/close cycle, no more temp files. The `bin/face-lock.js` start command was rewired to use the new interface; `cam.stopStream()` is called from the `stop` event handler.
+  - **Defensive cleanup:** `stop()` now SIGKILL-checks for a live stream child before exiting, so a hard `Ctrl-C` can't leave an orphaned `ffmpeg` process holding the camera.
+  - **Buffer mode is 0–5ms faster** than the temp-file path (no `fs.unlinkSync` per tick). It also uses ~1/3 the CPU at idle (one `ffmpeg` child vs. one-per-tick spawns).
+
+- **Windows dim now works on external monitors (HDMI/DP/DVI).** `overlay.windowsSleep()` used to call `WmiSetBrightness 0,0` via the `WmiMonitorBrightnessMethods` WMI class — that only works on **built-in laptop panels** (the WMI class is only registered for internal displays). External monitors attached over HDMI/DP/DVI were silently ignored.
+  - **Fix: `SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)`.** This is the Win32 API call that powers off any monitor that responds to the broadcast — built-in or external. The PowerShell wrapper now uses `Add-Type` P/Invoke (it was a plain `Get-WmiObject` call before). Constants: `HWND_BROADCAST=0xffff`, `WM_SYSCOMMAND=0x0112`, `SC_MONITORPOWER=0xf170`, `POWER_OFF=0x0002`.
+  - The PowerShell process is spawned with `detached: true` and `stdio: 'ignore'` (existing behaviour, now documented in code) — `windowsSleep()` is non-blocking.
+
+- **Monitor no longer gets stuck in LOCKED after an OS unlock.** The old code transitioned `LOCKED → PRESENT` on the **first** face match after OS unlock. A single false-positive (e.g. a stranger leaning in, or a liveness pass that should have rejected but didn't) could silently unlock the monitor.
+  - **Fix: `unlockResetMs: 2000` sustained-match gate.** The new monitor field `lockMatchStreak` counts consecutive matched faces while in `LOCKED`. The transition to `PRESENT` fires only when `lockMatchStreak * detectionIntervalMs >= unlockResetMs` — i.e. ~2s of sustained match. Any non-match (including a liveness reject) resets the streak to 0. The `onUnlocked()` handler also resets `livenessStreak` / `livenessRejectStreak` and the temporal-liveness buffer so a fresh monitor cycle starts cleanly.
+  - **Threat model:** only the enrolled face matches (via `profile.match()`), and liveness (default ON) catches photos/videos. So 2s of sustained match = the real user is at the desk.
+
+### Tests
+- 3 new monitor tests for the LOCKED→PRESENT reset behaviour: (1) sustained match resets, (2) single transient match does not, (3) liveness rejection blocks the reset.
+- 3 new overlay tests for the Windows dim path: (1) `windowsSleep` calls `SendMessage(SC_MONITORPOWER, 2)` not `WmiSetBrightness`, (2) non-Windows paths unchanged, (3) `windowsSleep` is non-blocking (uses `detached` + `stdio: 'ignore'`).
+- 1 new camera test: `Camera.startStream()` + `readFrame()` returns a valid JPEG `Buffer` (uses a fake `ffmpeg` shell script that emits a minimal JPEG on a pipe).
+- Test-fake gotcha fixed: `makeFakeFfmpeg` shebang is now `#!/bin/bash` (not `#!/bin/sh`) because `dash` (the default `/bin/sh` on Debian/Ubuntu) does not support `\xNN` hex escapes in its `printf` builtin — the fake would emit literal four-character text instead of raw JPEG bytes, and the stream parser would never see the SOI/EOI markers.
+- Full suite: **85/85 pass, 1 skip** (was 77/77; +8 from the new tests above).
+
+### Notes
+- **No new deps.** The ffmpeg stream is the same bundled binary we already ship in `bin/ffmpeg/<platform>/`. JPEG parsing is a 30-line hand-rolled SOI/EOI splitter (no `jpeg-js` / `sharp` dependency added).
+- **CPU/bandwidth budget at 2 fps:** on a 640×480 MJPEG stream this is ~50–100 KB/s of pipe data — negligible. If you want lower CPU on a slow laptop, set `face-lock --start --interval 1000` (1s tick → 0.5 fps average).
+- **Why 2 fps and not 1 fps:** the old capture-on-tick path could miss the face entirely if a tick landed between frames; 2 fps gives us one full frame per tick (500ms detection interval) with headroom for jitter.
+- **Stream startup is async and may take 200–500ms** (ffmpeg has to open the device, negotiate format, and emit the first frame). The `bin/face-lock.js` start command `await`s it before the `mon.start()` event fires, so you don't see a "monitoring started" message until the camera is actually producing frames.
 
 ## [0.2.0-alpha.7] - 2026-06-09
 

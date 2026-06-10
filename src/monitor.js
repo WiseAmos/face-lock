@@ -58,6 +58,7 @@ class Monitor extends EventEmitter {
 
     this.state = STATE.PRESENT;
     this.presentStreak = 0;
+    this.lockMatchStreak = 0;  // counts consecutive matches while in LOCKED
     this.graceTimer = null;
     this.softBlockTimer = null;
     this.awayDimTimer = null;
@@ -132,19 +133,31 @@ class Monitor extends EventEmitter {
     if (isYou) {
       this.presentStreak++;
       if (this.presentStreak >= this.cfg.minPresentFrames && this.state === STATE.GRACE) {
-        // Cancel grace — face returned within the window. LOCKED is terminal:
-        // the OS lock is already fired and requires a password to come back.
+        // Cancel grace — face returned within the window.
         this.onReturned();
       } else if (this.state === STATE.PRESENT) {
         // stay present
       } else if (this.state === STATE.LOCKED) {
-        // stay locked — face presence cannot override OS lock
+        // The OS lock is OS-side (LockWorkStation puts up the Windows
+        // password screen). The user must unlock via password first.
+        // Once they have, the face re-match here means they're back at
+        // the desk. We require a sustained match streak (unlockResetMs)
+        // to avoid a single false-positive resetting the monitor.
+        //
+        // Threat model: only the enrolled face matches; liveness (when
+        // enabled) catches photos/videos. So a sustained match means
+        // the real user has unlocked and is sitting at the desk.
+        this.lockMatchStreak++;
+        if (this.lockMatchStreak * this.cfg.detectionIntervalMs >= this.cfg.unlockResetMs) {
+          this.onUnlocked();
+        }
       }
       // Shoulder-surfing dim: two independent triggers, both feed one state.
       this.checkAwayDim(result);        // you, but head turned away
       this.checkMultiFaceDim(faceCount, allFaces); // you, but someone else is in frame
     } else {
       this.presentStreak = 0;
+      this.lockMatchStreak = 0;   // any non-match resets the lock-match streak
       this.clearAwayDim();
       if (this.state === STATE.PRESENT) {
         this.onLeft();
@@ -264,6 +277,23 @@ class Monitor extends EventEmitter {
     this.clearGrace();
   }
 
+  /**
+   * LOCKED → PRESENT transition. Called when the user has unlocked the OS
+   * (or was never actually away on Linux without a lock) and the face has
+   * matched sustained for `unlockResetMs`. Resets the lock counter so a
+   * subsequent grace→lock cycle can fire again.
+   */
+  onUnlocked() {
+    this.state = STATE.PRESENT;
+    this.lockMatchStreak = 0;
+    this.presentStreak = 0;
+    this.livenessStreak = 0;
+    this.livenessRejectStreak = 0;
+    this.livenessTl.reset();
+    this.log(1, 'face back after lock — monitor resumed');
+    this.emit('unlocked');
+  }
+
   scheduleGrace() {
     this.clearGrace();
     // soft block fires after a short delay (default 2s) so quick glances
@@ -277,6 +307,7 @@ class Monitor extends EventEmitter {
     }
     this.graceTimer = this.setTimer(() => {
       this.state = STATE.LOCKED;
+      this.lockMatchStreak = 0;  // reset streak; user must re-match to leave LOCKED
       this.log(1, 'grace expired — locking OS session');
       this.emit('lock');
       this.doLock();

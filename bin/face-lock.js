@@ -335,6 +335,19 @@ async function loadImageAsCanvas(imgPath) {
   return c;
 }
 
+// v0.2.0-alpha.8: stream mode delivers frames as JPEG Buffers, not file
+// paths. canvas.loadImage accepts a Buffer directly (parsed via
+// node-canvas's internal image lib) so we skip the temp-file round-trip
+// that the old capture() path used.
+async function loadImageFromBuffer(jpegBuf) {
+  if (!canvas) throw new Error('canvas not available');
+  const img = await canvas.loadImage(jpegBuf);
+  const c = canvas.createCanvas(img.width, img.height);
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  return c;
+}
+
 async function runInit(opts) {
   console.log('face-lock: enrollment\n');
   console.log('  Look at the camera. We capture ONE frame and store a 128-D');
@@ -425,15 +438,22 @@ async function runStart(opts) {
   if (opts.multiFaceDim) loaded.multiFaceDimEnabled = true;
 
   const cam = new camera.Camera({ index: loaded.cameraIndex });
+  // v0.2.0-alpha.8: continuous stream mode. The camera runs a long-lived
+  // ffmpeg child that emits JPEG frames to a pipe; cam.readFrame() returns
+  // the most recent frame on each call. This replaces the old per-tick
+  // capture-and-unlink cycle that was causing the Windows camera LED to
+  // flicker (camera was being opened and closed 2x/sec).
+  await cam.startStream();
   let timer = null;
   const mon = new monitorLib.Monitor({
     config: loaded,
     frameSource: {
       getFrame: async () => {
-        const p = await cam.capture();
-        const imgCanvas = await loadImageAsCanvas(p);
-        try { fs.unlinkSync(p); } catch (_) { /* */ }
-        return imgCanvas;
+        // 2s timeout — ffmpeg pipes frames every ~500ms at 2fps, so a missed
+        // frame should not stall the monitor loop indefinitely.
+        const jpegBuf = await cam.readFrame({ timeoutMs: 2000 });
+        if (!jpegBuf) return null;
+        return await loadImageFromBuffer(jpegBuf);
       },
     },
   });
@@ -446,7 +466,11 @@ async function runStart(opts) {
   mon.on('returned', () => { console.error('  → face back, grace cancelled'); });
   mon.on('soft-block', () => { console.error('  → soft-block: display off'); });
   mon.on('lock',     () => { console.error('  → OS lock fired'); });
-  mon.on('stop',     () => { if (timer) clearInterval(timer); cam.stop(); });
+  mon.on('stop',     () => {
+    if (timer) clearInterval(timer);
+    cam.stopStream().catch(() => { /* */ });
+    cam.stop();
+  });
 
   process.on('SIGINT', () => { mon.stop(); process.exit(0); });
   process.on('SIGTERM', () => { mon.stop(); process.exit(0); });

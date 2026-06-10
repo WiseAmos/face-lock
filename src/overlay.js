@@ -38,9 +38,36 @@ function linuxSleep() {
 }
 
 function windowsSleep() {
-  // PowerShell snippet that turns off the monitor. 1 second timeout because
-  // this is a "fire and forget" — the user only needs the display off.
-  const ps = '(Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.Bounds }) | Out-Null; (Get-WmiObject -Namespace root\\wmi -Class WmiMonitorBrightnessMethods).WmiSetBrightness(0,0)';
+  // Canonical "turn off any monitor" call. Works on BOTH built-in laptop
+  // panels AND external monitors connected via HDMI/DP/DVI.
+  //
+  // The old approach (WmiSetBrightness 0,0) only worked on built-in panels
+  // because it relies on the WmiMonitorBrightnessMethods WMI class, which
+  // is implemented by the panel driver and not exposed by external monitor
+  // drivers. On a desktop or laptop-with-external-display, the call returned
+  // 0 (success) but did nothing visible.
+  //
+  // SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2) goes
+  // through the user32.dll display driver path and works on all display
+  // types. Constants: HWND_BROADCAST=0xffff, WM_SYSCOMMAND=0x0112,
+  // SC_MONITORPOWER=0xf170, POWER_OFF=0x0002.
+  //
+  // We compile the P/Invoke type once per call (PowerShell sessions are
+  // short-lived for this fire-and-forget spawn). 1-second spawn timeout
+  // because this is fire-and-forget — the user only needs the display off.
+  const ps = [
+    "Add-Type -TypeDefinition '",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "namespace FL { public static class D {",
+    "  [DllImport(\"user32.dll\", CharSet = CharSet.Auto)]",
+    "  private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);",
+    "  public static void Off() {",
+    "    SendMessage((IntPtr)0xffff, 0x0112, (IntPtr)0xf170, (IntPtr)0x0002);",
+    "  }",
+    "} }'",
+    ";[FL.D]::Off()",
+  ].join('\n');
   const c = spawn('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',

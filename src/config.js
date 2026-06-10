@@ -31,6 +31,14 @@ const DEFAULTS = Object.freeze({
   //   2) temporal landmark jitter over a 1.5s rolling window
   // See src/liveness.js. Set to false in your config to disable.
   livenessEnabled: true,
+
+  // After the OS lock fires, the user has to unlock via password first.
+  // Once they have, the monitor's face loop sees them again. We require
+  // a sustained match streak of this many ms before transitioning
+  // LOCKED → PRESENT (so a single false-positive or a stranger leaning
+  // into view does not silently unlock the monitor). Threat model: only
+  // the enrolled face matches; liveness (when on) catches photos.
+  unlockResetMs: 2000,
 });
 
 function defaultConfigPath() {
