@@ -537,30 +537,182 @@ test('LOCKED → PRESENT: a single transient match is NOT enough', async () => {
   m.stop();
 });
 
-test('LOCKED → PRESENT: livenessEnabled must also pass for reset', async () => {
-  // When liveness is on, a match alone (without liveness) must NOT
-  // reset the monitor. Same threat model: liveness catches photos.
+test('LOCKED → PRESENT: liveness is sticky per presence (does not need to re-verify on every frame)', async () => {
+  // Real-world bug: alpha.8 stuck in LOCKED after user returned and sat
+  // still. Cause: liveness.check() returned alive=false on every frame
+  // because the nose-tip std-dev over the 1.5s window was ~0px (user
+  // sitting still). That blocked lockMatchStreak from ever advancing.
+  //
+  // Fix: liveness is now a "gating check on the first sighting of a new
+  // face." Once the face has been seen as alive, it stays trusted as
+  // long as the face remains visible. Only when the face is FULLY GONE
+  // (matched=false, frame after frame) does the sticky trust expire and
+  // the next face sighting need to re-prove liveness.
+  //
+  // This test: walk away → LOCKED. Then face returns with REAL landmarks
+  // and REAL motion. Liveness passes once (via a few moving frames), then
+  // face stays still (no further motion). Despite zero new motion, the
+  // sticky trust means the monitor MUST resume after unlockResetMs.
   let you = true;
-  // detection has no landmarks → liveness check returns no-detection.
-  // With livenessEnabled=true that should treat the face as not-you.
-  const { m } = makeMonitor({
-    detect: () => (you ? { descriptor: { label: 'me' } } : null),
+  let motion = 0;            // 0 = no motion (jitter < threshold), 1+ = motion
+  function makeRealResult() {
+    // Real-ish detection with 68 landmarks (nose at idx 30, eyes at 36/45)
+    // so liveness.check() can evaluate texture + motion.
+    const positions = [];
+    for (let i = 0; i < 68; i++) {
+      // Vary the nose (idx 30) by `motion` to simulate head movement
+      const dx = i === 30 ? motion : 0;
+      positions.push({ x: 100 + dx, y: 100 + (i === 30 ? motion : 0) });
+    }
+    return {
+      descriptor: { label: 'me' },
+      detection: {
+        landmarks: { positions },
+        alignedRect: { _box: { x: 50, y: 50, width: 100, height: 100 } },
+      },
+    };
+  }
+  const { m, events } = makeMonitor({
+    detect: () => (you ? makeRealResult() : null),
     graceMs: 50,
+    unlockResetMs: 200,
   });
-  m.cfg.livenessEnabled = true;  // turn on liveness (test default is off)
+  m.cfg.livenessEnabled = true;
   m.start();
+
+  // 1) Walk away → LOCKED
   you = false;
   await m.tick();
   await wait(100);
   assert.equal(m.state, STATE.LOCKED);
-  // Match arrives but liveness rejects (no landmarks → no-detection)
+  assert.equal(events.lock, 1);
+
+  // 2) User returns, moves their head for 1.5s → liveness should pass
+  you = true;
+  for (let i = 0; i < 12; i++) {     // 12 × 100ms = 1.2s of moving frames
+    motion = i + 1;                   // each frame nose moves
+    await m.tick();
+    await wait(100);
+  }
+  // Liveness should now be "alive" (hadMotion=true) and the
+  // presenceLiveSticky flag should be true.
+
+  // 3) User sits perfectly still. Despite no new motion, the sticky
+  //    trust means the monitor must still resume after unlockResetMs.
+  motion = 0;                         // no more motion
+  for (let i = 0; i < 10; i++) {
+    await m.tick();
+    await wait(100);
+    if (m.state === STATE.PRESENT) break;
+  }
+  assert.equal(m.state, STATE.PRESENT,
+    'liveness is sticky per presence — once trusted, a still face MUST resume the monitor');
+  assert.equal(events.unlocked, 1, 'unlocked event should fire once');
+  m.stop();
+});
+
+test('LOCKED → PRESENT: liveness re-verifies when face is fully gone then returns', async () => {
+  // Counter-test: if the face is FULLY GONE (matched=false for many
+  // frames in a row), the sticky trust expires. The next face sighting
+  // must re-prove liveness before it can transition.
+  //
+  // Walk away → LOCKED. Fake "match" arrives for a few frames (but
+  // liveness still false because we never pass it). With sticky logic
+  // and no prior live sighting, the monitor stays in LOCKED.
+  let you = true;
+  // Returns detection WITHOUT landmarks → liveness says no-detection
+  // → alive=false every frame.
+  const { m } = makeMonitor({
+    detect: () => (you ? { descriptor: { label: 'me' } } : null),
+    graceMs: 50,
+    unlockResetMs: 200,
+  });
+  m.cfg.livenessEnabled = true;
+  m.start();
+
+  // 1) Walk away → LOCKED
+  you = false;
+  await m.tick();
+  await wait(100);
+  assert.equal(m.state, STATE.LOCKED);
+
+  // 2) Match arrives (no landmarks → liveness rejects)
   you = true;
   for (let i = 0; i < 30; i++) {
     await m.tick();
     await wait(100);
   }
-  // Liveness keeps rejecting → still in LOCKED.
+  // No live sighting ever happened → sticky remains false → stay LOCKED
   assert.equal(m.state, STATE.LOCKED,
-    'liveness must block the LOCKED→PRESENT reset just like it blocks the GRACE→PRESENT path');
+    'without ever proving liveness, monitor must NOT resume');
+  m.stop();
+});
+
+test('LOCKED → PRESENT: liveness sticky trust expires after face fully gone', async () => {
+  // Variant: prove liveness once (get sticky=true), then face goes
+  // fully away for a beat, then a NEW (potentially spoof) face returns.
+  // The new sighting must re-prove liveness.
+  //
+  // Simulated by: prove live with motion frames → user goes away for
+  // 5 ticks → user comes back but liveness now stale → monitor waits
+  // for new liveness proof → resumes only after motion returns.
+  let you = true;
+  let motion = 0;
+  function makeRealResult() {
+    const positions = [];
+    for (let i = 0; i < 68; i++) {
+      const dx = i === 30 ? motion : 0;
+      positions.push({ x: 100 + dx, y: 100 + (i === 30 ? motion : 0) });
+    }
+    return {
+      descriptor: { label: 'me' },
+      detection: {
+        landmarks: { positions },
+        alignedRect: { _box: { x: 50, y: 50, width: 100, height: 100 } },
+      },
+    };
+  }
+  const { m } = makeMonitor({
+    detect: () => (you ? makeRealResult() : null),
+    graceMs: 50,
+    unlockResetMs: 200,
+  });
+  m.cfg.livenessEnabled = true;
+  m.start();
+
+  // 1) Walk away → LOCKED
+  you = false;
+  await m.tick();
+  await wait(100);
+  assert.equal(m.state, STATE.LOCKED);
+
+  // 2) Return with motion → liveness should pass → sticky=true
+  you = true;
+  for (let i = 0; i < 12; i++) {
+    motion = i + 1;
+    await m.tick();
+    await wait(100);
+  }
+
+  // 3) Walk away for 5 ticks (face fully gone)
+  you = false;
+  for (let i = 0; i < 5; i++) {
+    await m.tick();
+    await wait(100);
+  }
+  // Note: state is still LOCKED (didn't re-enter GRACE from LOCKED) but
+  // the sticky trust should have been reset because matched=false.
+  // (LockMatch streak reset too.)
+
+  // 4) Return BUT with no motion (e.g. a printed photo held up)
+  you = true;
+  motion = 0;
+  for (let i = 0; i < 30; i++) {
+    await m.tick();
+    await wait(100);
+  }
+  // Sticky was reset in step 3 → no new liveness proof → stay LOCKED
+  assert.equal(m.state, STATE.LOCKED,
+    'after a full face-gone gap, a motionless new face must NOT resume the monitor');
   m.stop();
 });

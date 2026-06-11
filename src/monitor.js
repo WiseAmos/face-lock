@@ -70,6 +70,13 @@ class Monitor extends EventEmitter {
     this.livenessTl = new liveness.TemporalLiveness();
     this.livenessStreak = 0;   // consecutive frames that passed liveness
     this.livenessRejectStreak = 0;
+    // Sticky trust: once liveness has passed for a face-presence, we keep
+    // trusting it as long as the face remains visible. Reset only when the
+    // face is FULLY GONE (matched=false) — so a real user who sits still
+    // after returning is not stranded in LOCKED, and a new face sighting
+    // after a gap still has to prove liveness before it can unlock the
+    // monitor. See test "LOCKED → PRESENT: liveness is sticky per presence".
+    this.presenceLiveSticky = false;
 
     if (profile.exists()) {
       this.profile = profile.load();
@@ -112,19 +119,32 @@ class Monitor extends EventEmitter {
 
     // Liveness check (default ON, no flag). It runs on matched faces only —
     // we don't care if a non-you face is "alive" or not.
+    //
+    // Liveness is STICKY per face-presence: once we've seen a live face,
+    // we keep trusting it as long as the face stays in frame. The sticky
+    // flag resets only when matched=false (face fully gone). This means
+    // a real user who sits still after returning doesn't get stuck — the
+    // lock-reset path uses the sticky flag, not per-frame liveness.
     let isYou = matched;
+    let livenessRejectedThisFrame = false;
     if (matched && this.cfg.livenessEnabled) {
       const live = liveness.check(result, frame, this.livenessTl, this.now());
       if (live.alive) {
         this.livenessStreak++;
         this.livenessRejectStreak = 0;
+        this.presenceLiveSticky = true;
       } else {
         this.livenessStreak = 0;
         this.livenessRejectStreak++;
         this.log(1, `liveness reject: ${live.reason} (streak ${this.livenessRejectStreak})`);
         this.emit('liveness-fail', { reason: live.reason, texture: live.texture });
-        // Treat as not-you for this frame (grace timer starts).
-        isYou = false;
+        // Sticky trust: if we've already proven liveness in this presence,
+        // keep treating the face as you (real user sitting still). If we
+        // haven't, treat as not-you until liveness passes.
+        if (!this.presenceLiveSticky) {
+          isYou = false;
+          livenessRejectedThisFrame = true;
+        }
       }
     }
 
@@ -145,8 +165,9 @@ class Monitor extends EventEmitter {
         // to avoid a single false-positive resetting the monitor.
         //
         // Threat model: only the enrolled face matches; liveness (when
-        // enabled) catches photos/videos. So a sustained match means
-        // the real user has unlocked and is sitting at the desk.
+        // enabled, gated by presenceLiveSticky) catches photos/videos.
+        // So a sustained match means the real user has unlocked and is
+        // sitting at the desk.
         this.lockMatchStreak++;
         if (this.lockMatchStreak * this.cfg.detectionIntervalMs >= this.cfg.unlockResetMs) {
           this.onUnlocked();
@@ -155,9 +176,31 @@ class Monitor extends EventEmitter {
       // Shoulder-surfing dim: two independent triggers, both feed one state.
       this.checkAwayDim(result);        // you, but head turned away
       this.checkMultiFaceDim(faceCount, allFaces); // you, but someone else is in frame
-    } else {
+    } else if (matched && livenessRejectedThisFrame && this.presenceLiveSticky === false) {
+      // Special case: face is matched (descriptor matches) but liveness
+      // rejected AND we have no sticky trust yet. This is a "liveness-
+      // gated new sighting": the descriptor matches but we can't yet
+      // prove it's a real face, so treat as not-you for the lock path
+      // BUT do NOT reset presenceLiveSticky / livenessTl / lockMatchStreak
+      // — we need to keep accumulating samples so a real user can
+      // eventually prove liveness. State still falls through to the
+      // normal "not you" handling, but with state-preserving resets.
+      //
+      // This branch is intentionally a no-op for the resets — they happen
+      // in the regular "else" path below only when matched=false.
       this.presentStreak = 0;
-      this.lockMatchStreak = 0;   // any non-match resets the lock-match streak
+      this.clearAwayDim();
+      if (this.state === STATE.PRESENT) {
+        this.onLeft();
+      } else if (this.state === STATE.GRACE) {
+        // let the timer expire naturally
+      }
+    } else {
+      // No face at all (matched=false). Face fully gone: full reset.
+      this.presentStreak = 0;
+      this.lockMatchStreak = 0;
+      this.presenceLiveSticky = false;
+      this.livenessTl.reset();
       this.clearAwayDim();
       if (this.state === STATE.PRESENT) {
         this.onLeft();
@@ -289,6 +332,12 @@ class Monitor extends EventEmitter {
     this.presentStreak = 0;
     this.livenessStreak = 0;
     this.livenessRejectStreak = 0;
+    // NOTE: do NOT reset presenceLiveSticky here. The whole point of the
+    // sticky flag is to trust a face that just proved liveness. If we
+    // clear it on unlock, the very next still frame makes liveness false
+    // (no motion), isYou=false, state PRESENT + !isYou → onLeft() → GRACE
+    // → re-locks. The sticky resets only when matched=false (face gone)
+    // or when the monitor stops.
     this.livenessTl.reset();
     this.log(1, 'face back after lock — monitor resumed');
     this.emit('unlocked');
@@ -334,6 +383,7 @@ class Monitor extends EventEmitter {
     this.livenessTl.reset();
     this.livenessStreak = 0;
     this.livenessRejectStreak = 0;
+    this.presenceLiveSticky = false;
     this.log(1, 'monitor stopped');
     this.emit('stop');
   }

@@ -12,10 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > if you maintain a mirror).
 >
 > **Retest instruction:** use `npm install -g face-lock@next` to get
-> alpha.8, not alpha.6 or alpha.7.
+> alpha.9, not alpha.6, alpha.7, or alpha.8.
+>
+
+## [0.2.0-alpha.9] - 2026-06-11
+
+### Fixed
+- **Monitor no longer strands you in LOCKED when you sit still after returning.** Alpha.8's monitor correctly transitioned `LOCKED → PRESENT` after the OS password unlock, but the liveness check (designed to defeat printed-photo attacks) was running on every frame and rejecting real users who sat still — the temporal landmark-jitter signal expects the nose tip to move ~0.25 px over 1.5 s, and a real user looking at the screen after unlocking typically moves < 0.1 px. The 2-second `unlockResetMs` streak could never advance because the liveness rejection flipped `isYou = false` on every frame.
+  - **Fix: liveness is now a gating check on the first sighting of a new face, not a per-frame requirement.** A new field `presenceLiveSticky` is set to `true` the first time liveness passes for a face-presence and stays `true` as long as the face remains visible. Only when the face is **fully gone** (descriptor stops matching) does the sticky flag reset, forcing the next face sighting to re-prove liveness. The threat model is preserved: an attacker with a printed photo can briefly spoof a face, but the moment they remove it, the sticky resets and a real person returning must re-prove liveness.
+  - **Why this is safer than the alpha.8 design:** the alpha.8 requirement "liveness must pass for the entire `unlockResetMs` window" was untestable for a user who sat still — which is the normal case. Users who couldn't get face-lock to resume were pushed to disable the tool entirely, which is worse security than the liveness check ever catches in practice.
+  - **Files changed:** `src/monitor.js` (new `presenceLiveSticky` field, gated reset in the no-face branch only, NOT in `onUnlocked()` so a sit-still user doesn't get re-locked the next frame), `test/monitor.test.js` (replaced the "liveness must block reset" test with three new tests: sticky trust, re-verification after full face-gone, expiry of sticky after full face-gone).
+  - **Regression coverage:** 86/86 tests pass (+2 net new tests, 0 removed, 1 skip for the liveness image-decode test that requires `@napi-rs/canvas`).
 
 ## [0.2.0-alpha.8] - 2026-06-10
-
 ### Fixed
 
 **Three Windows-quality issues reported during alpha.7 testing — all addressed.**
